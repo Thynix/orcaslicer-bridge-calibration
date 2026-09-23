@@ -40,13 +40,14 @@ def main():
         plate = plates[0][1]
     else:
         matches = [p for m, p in plates if m.get("plater_name") == args.plate]
-        if not matches:
+        if not matches:  # fall back to the plate number
             matches = [p for m, p in plates if m.get("plater_id") == args.plate]
         if not matches:
             avail = ", ".join(repr(m.get("plater_name", "")) for m, _ in plates)
             sys.exit(f"no plate {args.plate!r}; available: {avail}")
         plate = matches[0]
 
+    # A plate lists one model_instance per copy; print each object once.
     seen = set()
     for inst in plate.findall("model_instance"):
         oid = meta(inst).get("object_id")
