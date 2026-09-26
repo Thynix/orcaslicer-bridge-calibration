@@ -3,18 +3,20 @@
 
 Usage: bridge_plate.py FILE.3mf COUNT FLOW MIN_DENSITY MAX_DENSITY [-o OUT.3mf]
 
-The project must have a plate named "start" holding exactly one object, and at
-most one other plate. That other plate is emptied and reused, or a new plate
-is added if there is none. COUNT copies of the start object are laid out in a
-grid on it, with bridge_flow and internal_bridge_flow set to FLOW and
+The project must have a plate named "reference" holding exactly one object, and
+at most one other plate. That other plate is emptied and reused, or a new plate
+is added if there is none. COUNT copies of the reference object are placed on
+it at the X/Y positions of the plate's former objects, in their plate order, or
+laid out in a grid if there were fewer than COUNT of them, with bridge_flow and internal_bridge_flow set to FLOW and
 bridge_density stepping from MIN_DENSITY to MAX_DENSITY (percent, inclusive).
 Each copy's name, part names and text are set to "FLOW-DENSITY", e.g.
-"1.3-104", and the plate is named "Flow Factor FLOW". The start plate is
+"1.3-104", and the plate is named "Flow Factor FLOW". The reference plate is
 untouched. The file is modified in place (a .bak copy is kept) unless -o is
 given.
 
-Only the text settings are changed, not the text mesh: the copies share the
-start object's text geometry until the text is regenerated in the slicer.
+Each copy's text part gets its own sub-model file holding an empty mesh, which
+a patched OrcaSlicer (branch rebuild-empty-text-on-load) rebuilds from the text
+settings on load. Stock Orca drops such text parts.
 """
 import argparse
 import html
@@ -34,7 +36,7 @@ from fill_plate import (
 OBJ_META_RE = re.compile(r'^    <metadata key="([^"]+)" value="[^"]*"/>\n', re.M)
 PART_RE = re.compile(r"^    <part .*?^    </part>\n", re.M | re.S)
 TEXT_RE = re.compile(r'(<slic3rpe:text\b[^>]*\btext=")[^"]*"')
-START = "start"
+START = "reference"
 PROJECT = "Metadata/project_settings.config"
 GAP = 5  # minimum mm between copies
 # Orca lays plates out in a grid, LOGICAL_PART_PLATE_GAP apart (PartPlate.cpp).
@@ -90,6 +92,24 @@ def footprint(zin, model_obj, rotation):
             xs.append(x)
             ys.append(y)
     return min(xs), min(ys), max(xs), max(ys)
+
+
+def empty_text_mesh(zin, model_obj, text_id, path):
+    """Point MODEL_OBJ's text component at a new sub-model file PATH holding an
+    empty mesh; return the updated object and the new file's contents."""
+    comp = re.search(rf'<component p:path="([^"]+)" objectid="{text_id}" p:UUID="([0-9a-f]{{8}})[^>]*>',
+                     model_obj)
+    src_path, uuid_prefix = comp.groups()
+    src = zin.read(src_path.lstrip("/")).decode("utf-8")
+    uuid_suffix = re.search(rf'^  <object id="{text_id}" p:UUID="[0-9a-f]{{8}}([^"]*)"', src, re.M).group(1)
+    head = src[:src.index(" <resources>\n") + len(" <resources>\n")]
+    tail = src[src.index(" </resources>\n"):]
+    # Sub-model object UUIDs share the prefix of the component referencing them.
+    obj = (f'  <object id="{text_id}" p:UUID="{uuid_prefix}{uuid_suffix}" type="model">\n'
+           "   <mesh>\n    <vertices>\n    </vertices>\n    <triangles>\n    </triangles>\n   </mesh>\n"
+           "  </object>\n")
+    new_comp = comp.group(0).replace(f'p:path="{src_path}"', f'p:path="{path}"', 1)
+    return model_obj.replace(comp.group(0), new_comp, 1), head + obj + tail
 
 
 def plate_origin(index, plate_count, bed):
@@ -165,16 +185,37 @@ def build(zin, labels, plate_name):
     src_xform = re.search(r'transform="([^"]*)"', items[src]).group(1).split()
     box = footprint(zin, model_objs[src], src_xform[:9])
     origin = plate_origin(target_index, max(len(plates), 2), bed)
-    spots, fits = grid(len(labels), box, bed, origin)
+    # Former positions on the target plate, in plate order: instance N of an
+    # object is its Nth build item.
+    item_xforms = {}
+    for m in ITEM_RE.finditer(model):
+        item_xforms.setdefault(m.group(1), []).append(re.search(r'transform="([^"]*)"', m.group(0)).group(1).split())
+    old_spots = [tuple(item_xforms[meta_value(i, "object_id")][int(meta_value(i, "instance_id"))][9:11])
+                 for i in instances]
+    if len(old_spots) >= len(labels):
+        spots, fits = old_spots[:len(labels)], True
+    else:
+        spots, fits = grid(len(labels), box, bed, origin)
+        spots = [tuple(f"{v:.6g}" for v in spot) for spot in spots]
 
+    # Part ids in the config are the component objectids in 3dmodel.model.
+    text_ids = [re.search(r'<part id="(\d+)"', m.group(0)).group(1)
+                for m in PART_RE.finditer(cfg_objs[src]) if "<slic3rpe:text" in m.group(0)]
+    submodels = {}  # new sub-model files: path -> contents
+    next_file = max([int(n) for n in re.findall(r'_(\d+)\.model$', "\n".join(zin.namelist()), re.M)] + [0]) + 1
     new_obj = new_item = new_cfg = new_inst = new_asm = ""
     copies = []  # new object ids, in order
     for n, (label, settings) in enumerate(labels):
         oid = str(next_id + n)
         copies.append(oid)
         placed = src_xform[:]
-        placed[9:11] = (f"{v:.6g}" for v in spots[n])
-        new_obj += renumber_uuids(set_attr(model_objs[src], "id", oid), next_ordinal + n)
+        placed[9:11] = spots[n]
+        obj = renumber_uuids(set_attr(model_objs[src], "id", oid), next_ordinal + n)
+        for text_id in text_ids:
+            path = f"/3D/Objects/{label}_{next_file}.model"
+            next_file += 1
+            obj, submodels[path] = empty_text_mesh(zin, obj, text_id, path)
+        new_obj += obj
         item = set_attr(items[src], "objectid", oid)
         item = re.sub(r'(p:UUID=")[0-9a-f]{8}', rf"\g<1>{int(oid):08x}", item, count=1)
         new_item += set_attr(item, "transform", " ".join(placed))
@@ -218,7 +259,14 @@ def build(zin, labels, plate_name):
     out = {MODEL: model, CONFIG: cfg}
     if MODEL_RELS in zin.namelist():
         rels = zin.read(MODEL_RELS).decode("utf-8")
-        out[MODEL_RELS] = REL_RE.sub(lambda m: m.group(0) if m.group(1) in used else "", rels)
+        rels = REL_RE.sub(lambda m: m.group(0) if m.group(1) in used else "", rels)
+        next_rel = max(map(int, re.findall(r'Id="rel-(\d+)"', rels)), default=0) + 1
+        new_rels = "".join(
+            f' <Relationship Target="{path}" Id="rel-{next_rel + i}" '
+            'Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n'
+            for i, path in enumerate(submodels))
+        out[MODEL_RELS] = rels.replace("</Relationships>", new_rels + "</Relationships>", 1)
+    out.update({path.lstrip("/"): body for path, body in submodels.items()})
 
     # Height ranges are keyed by 1-based object index in build order.
     if RANGES in zin.namelist():
@@ -234,7 +282,7 @@ def build(zin, labels, plate_name):
         head = ranges[:RANGE_OBJ_RE.search(ranges).start()] if by_idx else ranges.replace("</objects>", "")
         out[RANGES] = head + body + "</objects>\n"
 
-    return out, dropped, removed, fits, bool(plate)
+    return out, dropped, removed, fits, bool(plate), len(old_spots) >= len(labels)
 
 
 def main():
@@ -242,18 +290,23 @@ def main():
     ap.add_argument("file")
     ap.add_argument("count", type=int, help="number of copies to add")
     ap.add_argument("flow", type=float, help="bridge flow ratio")
-    ap.add_argument("min_density", type=float, help="first bridge density, percent")
-    ap.add_argument("max_density", type=float, help="last bridge density, percent")
+    ap.add_argument("min_density", type=int, help="first bridge density, integer percent")
+    ap.add_argument("max_density", type=int, help="last bridge density, integer percent")
     ap.add_argument("-o", "--output", help="output file (default: modify in place)")
     args = ap.parse_args()
     if args.count < 1:
         ap.error("count must be at least 1")
+    span = abs(args.max_density - args.min_density)
+    if args.count > 1 and span % (args.count - 1):
+        valid = [d + 1 for d in range(1, span + 1) if span % d == 0]
+        ap.error(f"count {args.count} gives non-integer densities from {args.min_density} to "
+                 f"{args.max_density}; valid counts: 1, " + ", ".join(map(str, valid)))
 
     flow = fmt(args.flow)
-    step = (args.max_density - args.min_density) / max(args.count - 1, 1)
+    step = (args.max_density - args.min_density) // max(args.count - 1, 1)
     labels = []
     for n in range(args.count):
-        density = fmt(args.min_density + step * n)
+        density = str(args.min_density + step * n)
         labels.append((f"{flow}-{density}", {
             "bridge_flow": flow,
             "internal_bridge_flow": flow,
@@ -261,7 +314,7 @@ def main():
         }))
 
     with zipfile.ZipFile(args.file) as zin:
-        out, dropped, removed, fits, reused = build(zin, labels, f"Flow Factor {flow}")
+        out, dropped, removed, fits, reused, kept = build(zin, labels, f"Flow Factor {flow}")
         if args.output is None:
             shutil.copy2(args.file, args.file + ".bak")
         dest = args.output or args.file
@@ -272,15 +325,13 @@ def main():
                     continue
                 data = out[info.filename].encode("utf-8") if info.filename in out else zin.read(info)
                 zout.writestr(info, data, compress_type=info.compress_type)
+            for name in out.keys() - set(zin.namelist()):
+                zout.writestr(name, out[name].encode("utf-8"))
     shutil.move(tmp, dest)
 
-    print(f"{args.file}: {'reused' if reused else 'added'} plate 'Flow Factor {flow}'"
-          + (f", removed {len(removed)}" if removed else "") + ", added "
-          + ", ".join(label for label, _ in labels)
-          + (f" -> {args.output}" if args.output else ""))
+    print(f"{args.file} -> {args.output}" if args.output else "")
     if not fits:
         print("copies don't fit on the plate; arrange it in the slicer", file=sys.stderr)
-    print("text meshes are unchanged; regenerate each text in the slicer", file=sys.stderr)
 
 
 if __name__ == "__main__":
