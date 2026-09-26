@@ -1,3 +1,4 @@
 *.gcode
 *.bak
 *.3mf
+__pycache__/
