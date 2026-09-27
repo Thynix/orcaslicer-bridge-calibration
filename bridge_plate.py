@@ -73,8 +73,8 @@ def set_meta(block, key, value):
     return re.sub(rf'(<metadata key="{key}" value=")[^"]*', lambda m: m.group(1) + value, block, count=1)
 
 
-def set_attr(text, attr, value):
-    return re.sub(rf'\b{attr}="[^"]*"', f'{attr}="{value}"', text, count=1)
+def set_attr(text, name, value):
+    return re.sub(rf'\b{name}="[^"]*"', f'{name}="{value}"', text, count=1)
 
 
 def attr(text, name):
