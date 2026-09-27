@@ -12,8 +12,10 @@ set to "TENTHS-DENSITY", where TENTHS is the first decimal digit of FLOW, e.g.
 "3-104" for flow 1.3 and density 104%. The plate is named "Flow Factor FLOW".
 
 Each copy's text part gets its own sub-model file holding an empty mesh, which
-a patched OrcaSlicer (branch rebuild-empty-text-on-load) rebuilds from the text
-settings on load. Stock Orca drops such text parts.
+a patched OrcaSlicer (branch text-rebuild/integration) rebuilds from the text
+settings on load. Its component transform becomes the text frame, comp * T(c) *
+fix^-1 (c: centre of the old mesh's bounding box, fix: the shape's transform,
+which is dropped). Stock Orca drops such text parts.
 """
 import argparse
 import html
@@ -45,6 +47,7 @@ REL_RE = re.compile(r'^ <Relationship Target="([^"]+)"[^>]*/>\n', re.M)
 OBJ_META_RE = re.compile(r'^    <metadata key="([^"]+)" value="[^"]*"/>\n', re.M)
 PART_RE = re.compile(r"^    <part .*?^    </part>\n", re.M | re.S)
 TEXT_RE = re.compile(r'(<slic3rpe:text\b[^>]*\btext=")[^"]*"')
+SHAPE_RE = re.compile(r'<slic3rpe:shape\b[^>]*>')
 
 
 def meta_value(block, key):
@@ -88,6 +91,9 @@ def relabel(obj_cfg, oid, label, settings):
 
     def relabel_part(m):
         part = re.sub(r'(<metadata key="name" value=")[^"]*', rf"\g<1>{esc}", m.group(0), count=1)
+        if "<slic3rpe:text" in part:
+            # The fix transform is folded into the component transform by empty_text_mesh.
+            part = SHAPE_RE.sub(lambda s: re.sub(r' transform="[^"]*"', "", s.group(0)), part)
         return TEXT_RE.sub(lambda t: f'{t.group(1)}{esc}"', part)
 
     return head + PART_RE.sub(relabel_part, rest)
@@ -99,6 +105,21 @@ def xform(m, point):
     t = m[9:] or (0.0,) * 3
     x, y, z = point
     return tuple(x * m[i] + y * m[3 + i] + z * m[6 + i] + t[i] for i in range(3))
+
+
+def compose(a, b):
+    """The 3MF transform applying B, then A."""
+    return [v for r in (0, 3, 6) for v in xform(a[:9], b[r:r + 3])] + list(xform(a, b[9:]))
+
+
+def invert(m):
+    """Inverse of a 3MF transform."""
+    (a, b, c), (d, e, f), (g, h, i) = m[0:3], m[3:6], m[6:9]
+    det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+    inv = [x / det for x in (e * i - f * h, c * h - b * i, b * f - c * e,
+                             f * g - d * i, a * i - c * g, c * d - a * f,
+                             d * h - e * g, b * g - a * h, a * e - b * d)]
+    return inv + [-v for v in xform(inv, m[9:])]
 
 
 def footprint(submodels, model_obj, rotation, skip):
@@ -118,15 +139,21 @@ def footprint(submodels, model_obj, rotation, skip):
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def empty_text_mesh(submodels, model_obj, text_id, path):
+def empty_text_mesh(submodels, model_obj, text_id, fix, path):
     """Point MODEL_OBJ's text component at a new sub-model file PATH holding an
-    empty mesh; return the updated object and the new file's contents.
-    SUBMODELS maps the reference's sub-model paths to their contents."""
-    comp = re.search(rf'<component p:path="([^"]+)" objectid="{text_id}" p:UUID="([0-9a-f]{{8}})[^>]*>',
-                     model_obj)
+    empty mesh, with its transform set to the text frame; return the updated
+    object and the new file's contents. SUBMODELS maps the reference's sub-model
+    paths to their contents; FIX is the shape's transform or None."""
+    # Component objectids are only unique per file, so the text part's must be unambiguous.
+    comps = list(re.finditer(rf'<component p:path="([^"]+)" objectid="{text_id}" p:UUID="([0-9a-f]{{8}})[^>]*>',
+                             model_obj))
+    if len(comps) != 1:
+        sys.exit(f"expected 1 component for text part {text_id}, found {len(comps)}")
+    comp = comps[0]
     src_path, uuid_prefix = comp.groups()
     src_text = submodels[src_path]
-    uuid_suffix = re.search(rf'^  <object id="{text_id}" p:UUID="[0-9a-f]{{8}}([^"]*)"', src_text, re.M).group(1)
+    src_obj = re.search(rf'^  <object id="{text_id}" p:UUID="[0-9a-f]{{8}}([^"]*)".*?</object>', src_text, re.M | re.S)
+    uuid_suffix = src_obj.group(1)
     head = src_text[:src_text.index(" <resources>\n") + len(" <resources>\n")]
     tail = src_text[src_text.index(" </resources>\n"):]
     # Sub-model object UUIDs share the prefix of the component referencing them.
@@ -134,6 +161,18 @@ def empty_text_mesh(submodels, model_obj, text_id, path):
            "   <mesh>\n    <vertices>\n    </vertices>\n    <triangles>\n    </triangles>\n   </mesh>\n"
            "  </object>\n")
     new_comp = comp.group(0).replace(f'p:path="{src_path}"', f'p:path="{path}"', 1)
+    # Orca centres a loaded text mesh and undoes that with the fix transform; a
+    # rebuilt one isn't, so the text frame is comp * T(c) * fix^-1, with c the
+    # centre of the mesh's bounding box. A mesh already stripped keeps its frame.
+    verts = [tuple(map(float, v)) for v in
+             re.findall(r'<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"', src_obj.group(0))]
+    if verts:
+        c = [(min(v[i] for v in verts) + max(v[i] for v in verts)) / 2 for i in range(3)]
+        frame = [1, 0, 0, 0, 1, 0, 0, 0, 1] + c
+        if fix:
+            frame = compose(frame, invert(fix))
+        comp_xform = list(map(float, re.search(r'transform="([^"]*)"', comp.group(0)).group(1).split()))
+        new_comp = set_attr(new_comp, "transform", " ".join(f"{v:.9g}" for v in compose(comp_xform, frame)))
     return model_obj.replace(comp.group(0), new_comp, 1), head + obj + tail
 
 
@@ -200,9 +239,15 @@ def build(zin, variants, plate_name):
     next_ordinal = max(int(u, 16) for u in
                        re.findall(r'<object [^>]*p:UUID="([0-9a-f]{8})', model)) + 1
     next_identify = max(int(v) for v in re.findall(r'key="identify_id" value="(\d+)"', cfg)) + 1
-    # Part ids in the config are the component objectids in 3dmodel.model.
-    text_ids = [re.search(r'<part id="(\d+)"', m.group(0)).group(1)
-                for m in PART_RE.finditer(cfg_objs[src_id]) if "<slic3rpe:text" in m.group(0)]
+    # Part ids in the config are the component objectids in 3dmodel.model;
+    # text part id -> the shape's fix transform, if any.
+    text_parts = {}
+    for m in PART_RE.finditer(cfg_objs[src_id]):
+        if "<slic3rpe:text" in m.group(0):
+            shape = SHAPE_RE.search(m.group(0))
+            fix = shape and re.search(r'\btransform="([^"]*)"', shape.group(0))
+            text_parts[re.search(r'<part id="(\d+)"', m.group(0)).group(1)] = (
+                list(map(float, fix.group(1).split())) if fix else None)
     # Like Orca's bounding box, the footprint counts only model parts, not
     # modifiers, negative volumes or support blockers/enforcers.
     subtypes = dict(re.findall(r'<part id="(\d+)" subtype="([^"]*)"', cfg_objs[src_id]))
@@ -223,10 +268,10 @@ def build(zin, variants, plate_name):
         placed = src_xform[:]
         placed[9:11] = (f"{v:.6g}" for v in spots[n])  # mm; not a setting, so not fmt()
         obj = renumber_uuids(set_attr(model_objs[src_id], "id", oid), next_ordinal + n)
-        for text_id in text_ids:
+        for text_id, fix in text_parts.items():
             path = f"/3D/Objects/{label}_{next_file}.model"
             next_file += 1
-            obj, submodels[path] = empty_text_mesh(src_submodels, obj, text_id, path)
+            obj, submodels[path] = empty_text_mesh(src_submodels, obj, text_id, fix, path)
         new_obj += obj
         item = set_attr(items[src_id], "objectid", oid)
         item = re.sub(r'(p:UUID=")[0-9a-f]{8}', rf"\g<1>{int(oid):08x}", item, count=1)
