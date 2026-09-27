@@ -522,8 +522,8 @@ def main():
             raise
 
     if has_text:
-        print("note: text labels need OrcaSlicer branch text-rebuild/integration; "
-              "stock Orca drops them", file=sys.stderr)
+        print("note: Automatically regenerating text labels on load needs Thynix's OrcaSlicer branch rebuild-text-with-missing-mesh; "
+              "stock OrcaSlicer drops them. See https://github.com/Thynix/OrcaSlicer/tree/rebuild-text-with-missing-mesh", file=sys.stderr)
 
     if not fits:  # also true if a copy overlaps bed_exclude_area
         print("warning: copies don't fit on the plate; arrange it in the slicer", file=sys.stderr)
