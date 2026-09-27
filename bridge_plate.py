@@ -300,6 +300,7 @@ def grid(count, box, bed, exclude=None):
     spots = []
     for n in range(count):
         row, col = divmod(n, cols)
+        # row 0 is the top row: x grows rightward from x0, y shrinks downward from y1
         cx0, cy0 = x0 + gap_x + col * (w + gap_x), y1 - (row + 1) * (h + gap_y)
         if exclude is not None and cx0 < exclude[2] and cx0 + w > exclude[0] and cy0 < exclude[3] and cy0 + h > exclude[1]:
             fits = False
