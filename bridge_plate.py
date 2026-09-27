@@ -20,8 +20,9 @@ a patched OrcaSlicer rebuilds from the text settings on load. Its component
 transform becomes the text frame, comp * T(c) * fix^-1 (c: centre of the old
 mesh's bounding box, fix: the shape's transform, which is dropped). Stock
 OrcaSlicer silently drops such text parts, leaving the copies unlabelled.
-
-TODO: allow easier stock Orca usage by adding --keep-text-mesh
+With --keep-text-mesh, each copy's text part instead keeps sharing the
+reference's original (unmodified) mesh, so stock OrcaSlicer doesn't drop it;
+the part still shows the reference's original text until edited by hand.
 """
 import argparse
 import html
@@ -50,7 +51,7 @@ COMPONENT_PATH_RE = re.compile(r'<component p:path="([^"]+)"')
 CFG_OBJ_RE = re.compile(r'^  <object id="(\d+)">.*?^  </object>\n', re.M | re.S)
 PLATE_RE = re.compile(r"^  <plate>.*?^  </plate>\n", re.M | re.S)
 INSTANCE_RE = re.compile(r"^    <model_instance>.*?^    </model_instance>\n", re.M | re.S)
-ASSEMBLE_RE = re.compile(r'^   <assemble_item object_id="(\d+)" instance_id="(\d+)"[^>]*/>\n', re.M)
+ASSEMBLE_RE = re.compile(r'^   <assemble_item [^>]*/>\n', re.M)
 # layer_config_ranges.xml and cut_information.xml are both boost::ptree XML
 # with the same beautified indentation.
 XML_OBJ_RE = re.compile(r'^ <object id="(\d+)">.*?^ </object>\n', re.M | re.S)
@@ -169,6 +170,8 @@ def invert(m):
     """Inverse of a 3MF transform."""
     (a, b, c), (d, e, f), (g, h, i) = m[0:3], m[3:6], m[6:9]
     det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+    if not det:
+        sys.exit("reference text part's shape transform is singular")
     inv = [x / det for x in (e * i - f * h, c * h - b * i, b * f - c * e,
                              f * g - d * i, a * i - c * g, c * d - a * f,
                              d * h - e * g, b * g - a * h, a * e - b * d)]
@@ -218,7 +221,7 @@ def empty_text_mesh(submodels, model_obj, text_id, fix, path):
     obj = (f'  <object id="{text_id}" p:UUID="{uuid_prefix}{uuid_suffix}" type="model">\n'
            "   <mesh>\n    <vertices>\n    </vertices>\n    <triangles>\n    </triangles>\n   </mesh>\n"
            "  </object>\n")
-    new_comp = comp.group(0).replace(f'p:path="{src_path}"', f'p:path="{path}"', 1)
+    new_comp = set_attr(comp.group(0), "p:path", path)
     # Orca centres a loaded text mesh and undoes that with the fix transform; a
     # rebuilt one isn't, so the text frame is comp * T(c) * fix^-1, with c the
     # centre of the mesh's bounding box. A mesh already stripped keeps its frame.
@@ -258,6 +261,17 @@ def reindex_lines(text, src_idx, count):
     return header + "".join(f"object_id={i}|{line.group(1)}\n" for i in range(1, count + 1))
 
 
+def find_xml_obj(text, src_idx):
+    """The <object id="SRC_IDX">...</object> block in a boost::ptree XML file
+    (layer_config_ranges.xml or cut_information.xml), or None."""
+    return next((m.group(0) for m in XML_OBJ_RE.finditer(text) if m.group(1) == src_idx), None)
+
+
+def bbox(points):
+    return (min(p[0] for p in points), min(p[1] for p in points),
+            max(p[0] for p in points), max(p[1] for p in points))
+
+
 def grid(count, box, bed, exclude=None):
     """X/Y translations spreading COUNT objects with footprint BOX evenly over
     the bed, and whether they keep at least GAP from the bed edges and each
@@ -275,26 +289,26 @@ def grid(count, box, bed, exclude=None):
     for n in range(count):
         row, col = divmod(n, cols)
         cx0, cy0 = x0 + gap_x + col * (w + gap_x), y1 - (row + 1) * (h + gap_y)
-        if exclude and cx0 < exclude[2] and cx0 + w > exclude[0] and cy0 < exclude[3] and cy0 + h > exclude[1]:
+        if exclude is not None and cx0 < exclude[2] and cx0 + w > exclude[0] and cy0 < exclude[3] and cy0 + h > exclude[1]:
             fits = False
         spots.append((cx0 - bx0, cy0 - by0))
     return spots, fits
 
 
-def build(zin, variants, plate_name):
+def build(zin, variants, plate_name, keep_text_mesh=False):
     names = set(zin.namelist())
     model = zin.read(MODEL).decode("utf-8")
     if CONFIG not in names:
         sys.exit("not an Orca/Bambu project: no Metadata/model_settings.config")
     cfg = zin.read(CONFIG).decode("utf-8")
     proj = json.loads(zin.read(PROJECT))
-    pts = [tuple(map(float, p.split("x"))) for p in proj["printable_area"]]
-    bed = (min(p[0] for p in pts), min(p[1] for p in pts),
-           max(p[0] for p in pts), max(p[1] for p in pts))
-    # Same "XxY" format as printable_area; [] or ["0x0"] excludes nothing.
-    excl_pts = [tuple(map(float, p.split("x"))) for p in proj.get("bed_exclude_area") or ["0x0"]]
-    exclude = (min(p[0] for p in excl_pts), min(p[1] for p in excl_pts),
-               max(p[0] for p in excl_pts), max(p[1] for p in excl_pts))
+    bed = bbox([tuple(map(float, p.split("x"))) for p in proj["printable_area"]])
+    # Same "XxY" format as printable_area; missing, empty or a degenerate
+    # (zero-area) box, e.g. ["0x0"], excludes nothing.
+    excl_pts = [tuple(map(float, p.split("x"))) for p in proj.get("bed_exclude_area") or []]
+    exclude = bbox(excl_pts) if excl_pts else None
+    if exclude is not None and (exclude[2] <= exclude[0] or exclude[3] <= exclude[1]):
+        exclude = None
 
     plates = PLATE_RE.findall(cfg)
     if len(plates) != 1:
@@ -321,7 +335,10 @@ def build(zin, variants, plate_name):
     for m in ITEM_RE.finditer(model):
         items.setdefault(m.group(1), []).append(m.group(0))
     for m in ASSEMBLE_RE.finditer(cfg):
-        assemble[(m.group(1), m.group(2))] = m.group(0)
+        item = m.group(0)
+        if "instance_id" not in item:
+            sys.exit("assemble_item has no instance_id; re-save the reference in a recent OrcaSlicer")
+        assemble[(attr(item, "object_id"), attr(item, "instance_id"))] = item
 
     next_id = max(map(int, model_objs)) + 1
     # Also unique per file: the object UUID ordinal prefix (see renumber_uuids)
@@ -349,6 +366,8 @@ def build(zin, variants, plate_name):
     # The build item and assemble item for the instance actually on the plate,
     # which need not be instance 0 (e.g. instance 0 sits on another plate).
     k = int(meta_value(instances[0], "instance_id"))
+    if k >= len(items.get(src_id, [])):
+        sys.exit(f"plate instance has instance_id {k}, but object {src_id} has no matching build item")
     src_item = items[src_id][k]
     src_xform = attr(src_item, "transform").split()
     # The reference's sub-model files, read once for the footprint and text parts.
@@ -367,10 +386,11 @@ def build(zin, variants, plate_name):
         placed = src_xform[:]
         placed[9:11] = (f"{v:.6g}" for v in spots[n])  # mm; not a setting, so not fmt()
         obj = renumber_uuids(set_attr(model_objs[src_id], "id", oid), next_ordinal + n)
-        for text_id, fix in text_parts.items():
-            path = f"/3D/Objects/{name}_{next_file}.model"
-            next_file += 1
-            obj, submodels[path] = empty_text_mesh(src_submodels, obj, text_id, fix, path)
+        if not keep_text_mesh:
+            for text_id, fix in text_parts.items():
+                path = f"/3D/Objects/{name}_{next_file}.model"
+                next_file += 1
+                obj, submodels[path] = empty_text_mesh(src_submodels, obj, text_id, fix, path)
         new_obj += obj
         item = set_attr(src_item, "objectid", oid)
         item = re.sub(r'(p:UUID=")[0-9a-f]{8}', rf"\g<1>{int(oid):08x}", item, count=1)
@@ -400,16 +420,18 @@ def build(zin, variants, plate_name):
 
     # Sub-model files no longer referenced by any component. p:path is
     # XML-escaped; unescape it to compare against the raw zip entry names.
-    used = {html.unescape(p) for p in COMPONENT_PATH_RE.findall(model)}
+    used_esc = set(COMPONENT_PATH_RE.findall(model))
+    used = {html.unescape(p) for p in used_esc}
     all_paths = {"/" + n for n in names if n.startswith("3D/Objects/")}
     dropped = {p.lstrip("/") for p in all_paths - used}
 
     # A kept reference file's original text mesh is itself no longer
     # referenced (each copy points at its own empty-mesh file instead);
     # prune that dead object so Orca doesn't parse and discard it every time.
+    # p:path here stays XML-escaped, matching src_submodels' (escaped) keys.
     referenced = set(re.findall(r'p:path="([^"]+)" objectid="(\d+)"', model))
     pruned = {}
-    for path in used & src_submodels.keys():
+    for path in used_esc & src_submodels.keys():
         body = MODEL_OBJ_RE.sub(lambda m: m.group(0) if (path, m.group(1)) in referenced else "",
                                 src_submodels[path])
         if body != src_submodels[path]:
@@ -435,7 +457,7 @@ def build(zin, variants, plate_name):
     src_idx = str(list(items).index(src_id) + 1)
     if RANGES in names:
         ranges = zin.read(RANGES).decode("utf-8")
-        block = next((m.group(0) for m in XML_OBJ_RE.finditer(ranges) if m.group(1) == src_idx), None)
+        block = find_xml_obj(ranges, src_idx)
         if block:
             body = "".join(set_attr(block, "id", str(i)) for i in range(1, len(variants) + 1))
             out[RANGES] = ranges[:XML_OBJ_RE.search(ranges).start()] + body + "</objects>\n"
@@ -443,7 +465,7 @@ def build(zin, variants, plate_name):
             dropped.add(RANGES)
     if CUT_INFO in names:
         cut = zin.read(CUT_INFO).decode("utf-8")
-        block = next((m.group(0) for m in XML_OBJ_RE.finditer(cut) if m.group(1) == src_idx), None)
+        block = find_xml_obj(cut, src_idx)
         cut_id = block and re.search(r'<cut_id id="(\d+)"', block)
         if cut_id and cut_id.group(1) != "0":
             # The copies would all share the reference's cut id, linking them
@@ -469,6 +491,11 @@ def main():
     ap.add_argument("flow", type=flow_ratio, help="bridge flow ratio, 1.0 to 1.9 in steps of 0.1")
     ap.add_argument("min_density", type=density_percent, help="first bridge density, integer percent, 10 to 125")
     ap.add_argument("max_density", type=density_percent, help="last bridge density, integer percent, 10 to 125")
+    ap.add_argument("--keep-text-mesh", action="store_true",
+                     help="keep each copy's text part on the reference's original, unmodified mesh "
+                          "(so stock OrcaSlicer doesn't drop it), instead of an empty mesh a patched "
+                          "OrcaSlicer rebuilds per-copy; the text will read the reference's original "
+                          "label until edited by hand")
     args = ap.parse_args()
     if os.path.exists(args.output) and os.path.samefile(args.reference, args.output):
         ap.error("output must differ from the reference")
@@ -500,7 +527,7 @@ def main():
 
     tmp = args.output + ".tmp"
     with zipfile.ZipFile(args.reference) as zin:
-        out, dropped, fits, has_text, names = build(zin, variants, f"Flow Factor {flow}")
+        out, dropped, fits, has_text, names = build(zin, variants, f"Flow Factor {flow}", args.keep_text_mesh)
         # New entries take the reference model's timestamp so output is reproducible.
         date_time = zin.getinfo(MODEL).date_time
         zout = zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED)
@@ -522,8 +549,12 @@ def main():
             raise
 
     if has_text:
-        print("note: Automatically regenerating text labels on load needs Thynix's OrcaSlicer branch rebuild-text-with-missing-mesh; "
-              "stock OrcaSlicer drops them. See https://github.com/Thynix/OrcaSlicer/tree/rebuild-text-with-missing-mesh", file=sys.stderr)
+        if args.keep_text_mesh:
+            print("note: --keep-text-mesh kept each copy's text part on the reference's original mesh; "
+                  "it reads the reference's original label until edited by hand in OrcaSlicer.", file=sys.stderr)
+        else:
+            print("note: Automatically regenerating text labels on load needs Thynix's OrcaSlicer branch rebuild-text-with-missing-mesh; "
+                  "stock OrcaSlicer drops them. See https://github.com/Thynix/OrcaSlicer/tree/rebuild-text-with-missing-mesh", file=sys.stderr)
 
     if not fits:  # also true if a copy overlaps bed_exclude_area
         print("warning: copies don't fit on the plate; arrange it in the slicer", file=sys.stderr)
