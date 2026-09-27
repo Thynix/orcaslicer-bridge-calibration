@@ -318,7 +318,7 @@ def build(zin, variants, plate_name, keep_text_mesh=False):
     plate_ids = list(dict.fromkeys(meta_value(i, "object_id") for i in instances))
     cfg_objs = {m.group(1): m.group(0) for m in CFG_OBJ_RE.finditer(cfg)}
     if len(plate_ids) != 1:
-        found = ", ".join(repr(meta_value(cfg_objs[o], "name")) for o in plate_ids) or "none"
+        found = ", ".join(repr(meta_value(cfg_objs.get(o, ""), "name") or f"id {o}") for o in plate_ids) or "none"
         sys.exit(f"expected exactly 1 object on the plate, found {found}")
     src_id = plate_ids[0]
 
