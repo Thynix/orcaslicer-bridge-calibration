@@ -81,7 +81,8 @@ def flow_ratio(text):
     # must be one of 1.0-1.9 for them to identify it (within Orca's (0, 2]).
     value = float(text)
     if not (math.isfinite(value) and 1 <= value <= 1.9 and abs(value * 10 - round(value * 10)) < 1e-9):
-        raise argparse.ArgumentTypeError(f"{text!r} is not a flow ratio from 1.0 to 1.9 in steps of 0.1")
+        raise argparse.ArgumentTypeError(f"{text!r} is not a flow ratio from 1.0 to 1.9 in steps of 0.1 "
+                                         "(the label shows only the tenths digit)")
     return round(value, 1)
 
 
@@ -89,7 +90,7 @@ def density_percent(text):
     # Orca's bridge_density range.
     value = int(text)
     if not 10 <= value <= 125:
-        raise argparse.ArgumentTypeError(f"{text!r} is not a density from 10 to 125")
+        raise argparse.ArgumentTypeError(f"{text!r} is not a density from 10 to 125 (Orca's bridge_density range)")
     return value
 
 
@@ -373,9 +374,9 @@ def main():
         ap.error("count must be at least 1")
     span = abs(args.max_density - args.min_density)
     if args.count > 1 and not span:
-        ap.error(f"count {args.count} needs different min and max densities")
+        ap.error(f"count {args.count} needs different min and max densities, or the copies are identical")
     if args.count == 1 and span:
-        ap.error("count 1 needs equal min and max densities")
+        ap.error("count 1 needs equal min and max densities, or max is ignored")
     if args.count > 1 and span % (args.count - 1):
         # count - 1 steps must divide the span, so valid counts are d + 1 for divisors d of span.
         valid = [d + 1 for d in range(1, span + 1) if span % d == 0]
