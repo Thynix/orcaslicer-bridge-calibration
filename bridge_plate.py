@@ -9,8 +9,9 @@ The reference project must have one plate holding one object. OUT.3mf
 by COUNT copies of it laid out in a grid, with bridge_flow and
 internal_bridge_flow set to FLOW and bridge_density stepping from MIN_DENSITY
 to MAX_DENSITY (percent, inclusive). Each copy is named "FLOW-DENSITY", e.g.
-"1.3-104" for flow 1.3 and density 104%. Its text parts' text and names are
-set to "TENTHS-DENSITY", where TENTHS is the first decimal digit of FLOW, e.g.
+"1.3-104" for flow 1.3 and density 104% (FLOW is written as Orca writes the
+setting, so 1.0 is "1", not "1.0"). Its text parts' text and names are set to
+"TENTHS-DENSITY", where TENTHS is the first decimal digit of FLOW, e.g.
 "3-104"; other part names are kept. FLOW must be 1.0 to 1.9 in steps of 0.1 so
 TENTHS identifies it. The plate is named "Flow Factor FLOW".
 
@@ -28,7 +29,6 @@ import json
 import math
 import os
 import re
-import shutil
 import sys
 import zipfile
 
@@ -36,7 +36,9 @@ MODEL = "3D/3dmodel.model"
 MODEL_RELS = "3D/_rels/3dmodel.model.rels"
 CONFIG = "Metadata/model_settings.config"
 RANGES = "Metadata/layer_config_ranges.xml"
+CUT_INFO = "Metadata/cut_information.xml"
 PROFILES = "Metadata/layer_heights_profile.txt"
+BRIM_EARS = "Metadata/brim_ear_points.txt"
 PROJECT = "Metadata/project_settings.config"
 GAP = 5  # minimum mm between copies
 
@@ -48,13 +50,16 @@ COMPONENT_PATH_RE = re.compile(r'<component p:path="([^"]+)"')
 CFG_OBJ_RE = re.compile(r'^  <object id="(\d+)">.*?^  </object>\n', re.M | re.S)
 PLATE_RE = re.compile(r"^  <plate>.*?^  </plate>\n", re.M | re.S)
 INSTANCE_RE = re.compile(r"^    <model_instance>.*?^    </model_instance>\n", re.M | re.S)
-ASSEMBLE_RE = re.compile(r'^   <assemble_item object_id="(\d+)"[^>]*/>\n', re.M)
-RANGE_OBJ_RE = re.compile(r'^ <object id="(\d+)">.*?^ </object>\n', re.M | re.S)
+ASSEMBLE_RE = re.compile(r'^   <assemble_item object_id="(\d+)" instance_id="(\d+)"[^>]*/>\n', re.M)
+# layer_config_ranges.xml and cut_information.xml are both boost::ptree XML
+# with the same beautified indentation.
+XML_OBJ_RE = re.compile(r'^ <object id="(\d+)">.*?^ </object>\n', re.M | re.S)
 REL_RE = re.compile(r'^ <Relationship Target="([^"]+)"[^>]*/>\n', re.M)
 OBJ_META_RE = re.compile(r'^    <metadata key="([^"]+)" value="[^"]*"/>\n', re.M)
 PART_RE = re.compile(r"^    <part .*?^    </part>\n", re.M | re.S)
 TEXT_RE = re.compile(r'(<slic3rpe:text\b[^>]*\btext=")[^"]*"')
 SHAPE_RE = re.compile(r'<slic3rpe:shape\b[^>]*>')
+VERTEX_RE = re.compile(r'<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"')
 
 
 def meta_value(block, key):
@@ -62,8 +67,22 @@ def meta_value(block, key):
     return html.unescape(m.group(1)) if m else None
 
 
+def set_meta(block, key, value):
+    """Set metadata KEY's value in BLOCK to VALUE, the write-side partner of meta_value."""
+    return re.sub(rf'(<metadata key="{key}" value=")[^"]*', lambda m: m.group(1) + value, block, count=1)
+
+
 def set_attr(text, attr, value):
     return re.sub(rf'\b{attr}="[^"]*"', f'{attr}="{value}"', text, count=1)
+
+
+def attr(text, name):
+    """Read attribute NAME from TEXT, the read-side partner of set_attr."""
+    return re.search(rf'\b{name}="([^"]*)"', text).group(1)
+
+
+def floats(text):
+    return list(map(float, text.split()))
 
 
 def renumber_uuids(obj, ordinal):
@@ -81,7 +100,10 @@ def fmt(value):
 def flow_ratio(text):
     # The text shows only the tenths to fit the tile's text area, so the flow
     # must be one of 1.0-1.9 for them to identify it (within Orca's (0, 2]).
-    value = float(text)
+    try:
+        value = float(text)
+    except ValueError:
+        value = math.nan
     if not (math.isfinite(value) and 1 <= value <= 1.9 and abs(value * 10 - round(value * 10)) < 1e-9):
         raise argparse.ArgumentTypeError(f"{text!r} is not a flow ratio from 1.0 to 1.9 in steps of 0.1 "
                                          "(the label shows only the tenths digit)")
@@ -90,7 +112,10 @@ def flow_ratio(text):
 
 def density_percent(text):
     # Orca's bridge_density range.
-    value = int(text)
+    try:
+        value = int(text)
+    except ValueError:
+        value = -1
     if not 10 <= value <= 125:
         raise argparse.ArgumentTypeError(f"{text!r} is not a density from 10 to 125 (Orca's bridge_density range)")
     return value
@@ -111,15 +136,15 @@ def relabel(obj_cfg, oid, name, text, settings):
     meta.update(settings)
     meta_items = [(k, meta[k]) for k in sorted(meta)]
     head = OBJ_META_RE.sub("", head) + "".join(
-        f'    <metadata key="{k}" value="{html.escape(v, quote=True)}"/>\n'
+        f'    <metadata key="{k}" value="{html.escape(v)}"/>\n'
         for k, v in [("name", name)] + meta_items)
-    esc = html.escape(text, quote=True)
+    esc = html.escape(text)
 
     def relabel_part(m):
         part = m.group(0)
         if "<slic3rpe:text" not in part:
             return part
-        part = re.sub(r'(<metadata key="name" value=")[^"]*', rf"\g<1>{esc}", part, count=1)
+        part = set_meta(part, "name", esc)
         # The fix transform is folded into the component transform by empty_text_mesh.
         part = SHAPE_RE.sub(lambda s: re.sub(r' transform="[^"]*"', "", s.group(0)), part)
         return TEXT_RE.sub(lambda t: f'{t.group(1)}{esc}"', part)
@@ -154,16 +179,19 @@ def footprint(submodels, model_obj, rotation, skip):
     """X/Y bounding box of a top-level object in its own frame, rotated as placed,
     leaving out the components with ids in SKIP."""
     xs, ys = [], []
-    for comp in re.finditer(r'<component p:path="([^"]+)" objectid="(\d+)"[^>]*transform="([^"]*)"', model_obj):
-        path, oid, comp_xform = comp.groups()
+    for comp in re.finditer(r'<component[^>]*/>', model_obj):
+        comp = comp.group(0)
+        oid = attr(comp, "objectid")
         if oid in skip:
             continue
-        body = re.search(rf'<object id="{oid}".*?</object>', submodels[path], re.S).group(0)
-        comp_m = list(map(float, comp_xform.split()))
-        for v in re.finditer(r'<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"', body):
+        body = re.search(rf'<object id="{oid}".*?</object>', submodels[attr(comp, "p:path")], re.S).group(0)
+        comp_m = floats(attr(comp, "transform"))
+        for v in VERTEX_RE.finditer(body):
             x, y, _ = xform(rotation, xform(comp_m, map(float, v.groups())))
             xs.append(x)
             ys.append(y)
+    if not xs:
+        sys.exit("reference object has no model-part components")
     return min(xs), min(ys), max(xs), max(ys)
 
 
@@ -181,6 +209,8 @@ def empty_text_mesh(submodels, model_obj, text_id, fix, path):
     src_path, uuid_prefix = comp.groups()
     src_text = submodels[src_path]
     src_obj = re.search(rf'^  <object id="{text_id}" p:UUID="[0-9a-f]{{8}}([^"]*)".*?</object>', src_text, re.M | re.S)
+    if src_obj is None:
+        sys.exit(f"text part {text_id}'s sub-model object doesn't match the expected p:UUID format")
     uuid_suffix = src_obj.group(1)
     head = src_text[:src_text.index(" <resources>\n") + len(" <resources>\n")]
     tail = src_text[src_text.index(" </resources>\n"):]
@@ -192,21 +222,21 @@ def empty_text_mesh(submodels, model_obj, text_id, fix, path):
     # Orca centres a loaded text mesh and undoes that with the fix transform; a
     # rebuilt one isn't, so the text frame is comp * T(c) * fix^-1, with c the
     # centre of the mesh's bounding box. A mesh already stripped keeps its frame.
-    verts = [tuple(map(float, v)) for v in
-             re.findall(r'<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"', src_obj.group(0))]
+    verts = [tuple(map(float, v)) for v in VERTEX_RE.findall(src_obj.group(0))]
     if verts:
         c = [(min(v[i] for v in verts) + max(v[i] for v in verts)) / 2 for i in range(3)]
         frame = [1, 0, 0, 0, 1, 0, 0, 0, 1] + c
         if fix:
             frame = compose(frame, invert(fix))
-        comp_xform = list(map(float, re.search(r'transform="([^"]*)"', comp.group(0)).group(1).split()))
-        new_comp = set_attr(new_comp, "transform", " ".join(f"{v:.9g}" for v in compose(comp_xform, frame)))
+        comp_xform = floats(attr(comp.group(0), "transform"))
+        new_comp = set_attr(new_comp, "transform",
+                            " ".join(f"{v:.9g}" for v in compose(comp_xform, frame)))  # Orca's transform precision
     return model_obj.replace(comp.group(0), new_comp, 1), head + obj + tail
 
 
 def rename_plate(plate, name):
     """Set a config <plate> block's plater_name, adding it after plater_id if missing."""
-    name_line = f'    <metadata key="plater_name" value="{html.escape(name, quote=True)}"/>\n'
+    name_line = f'    <metadata key="plater_name" value="{html.escape(name)}"/>\n'
     plate, renamed = re.subn(r'^    <metadata key="plater_name" value="[^"]*"/>\n',
                              lambda m: name_line, plate, count=1, flags=re.M)
     if not renamed:
@@ -215,9 +245,23 @@ def rename_plate(plate, name):
     return plate
 
 
-def grid(count, box, bed):
+def reindex_lines(text, src_idx, count):
+    """TEXT is an "object_id=N|..." file (layer_heights_profile.txt or
+    brim_ear_points.txt) with one line per 1-based object index in build
+    order, plus optional non-"object_id=" header lines (e.g.
+    brim_points_format_version=). Return it with the reference object's own
+    line, if any, replicated to ids 1..COUNT; or None if it has none."""
+    line = re.search(rf"^object_id={src_idx}\|(.*)$", text, re.M)
+    if not line:
+        return None
+    header = "".join(l + "\n" for l in text.splitlines() if not l.startswith("object_id="))
+    return header + "".join(f"object_id={i}|{line.group(1)}\n" for i in range(1, count + 1))
+
+
+def grid(count, box, bed, exclude=None):
     """X/Y translations spreading COUNT objects with footprint BOX evenly over
-    the bed, and whether they keep GAP apart and inside it."""
+    the bed, and whether they keep at least GAP from the bed edges and each
+    other and clear of EXCLUDE (a bed_exclude_area bounding box, or None)."""
     bx0, by0, bx1, by1 = box
     w, h = bx1 - bx0, by1 - by0
     x0, y0, x1, y1 = bed
@@ -226,20 +270,31 @@ def grid(count, box, bed):
     cols = math.ceil(count / rows)
     gap_x = (x1 - x0 - cols * w) / (cols + 1)
     gap_y = (y1 - y0 - rows * h) / (rows + 1)
+    fits = min(gap_x, gap_y) >= GAP
     spots = []
     for n in range(count):
         row, col = divmod(n, cols)
-        spots.append((x0 + gap_x + col * (w + gap_x) - bx0, y1 - (row + 1) * (h + gap_y) - by0))
-    return spots, min(gap_x, gap_y) >= GAP
+        cx0, cy0 = x0 + gap_x + col * (w + gap_x), y1 - (row + 1) * (h + gap_y)
+        if exclude and cx0 < exclude[2] and cx0 + w > exclude[0] and cy0 < exclude[3] and cy0 + h > exclude[1]:
+            fits = False
+        spots.append((cx0 - bx0, cy0 - by0))
+    return spots, fits
 
 
 def build(zin, variants, plate_name):
+    names = set(zin.namelist())
     model = zin.read(MODEL).decode("utf-8")
+    if CONFIG not in names:
+        sys.exit("not an Orca/Bambu project: no Metadata/model_settings.config")
     cfg = zin.read(CONFIG).decode("utf-8")
-    area = json.loads(zin.read(PROJECT))["printable_area"]
-    pts = [tuple(map(float, p.split("x"))) for p in area]
+    proj = json.loads(zin.read(PROJECT))
+    pts = [tuple(map(float, p.split("x"))) for p in proj["printable_area"]]
     bed = (min(p[0] for p in pts), min(p[1] for p in pts),
            max(p[0] for p in pts), max(p[1] for p in pts))
+    # Same "XxY" format as printable_area; [] or ["0x0"] excludes nothing.
+    excl_pts = [tuple(map(float, p.split("x"))) for p in proj.get("bed_exclude_area") or ["0x0"]]
+    exclude = (min(p[0] for p in excl_pts), min(p[1] for p in excl_pts),
+               max(p[0] for p in excl_pts), max(p[1] for p in excl_pts))
 
     plates = PLATE_RE.findall(cfg)
     if len(plates) != 1:
@@ -254,12 +309,19 @@ def build(zin, variants, plate_name):
     src_id = plate_ids[0]
 
     model_objs = {m.group(1): m.group(0) for m in MODEL_OBJ_RE.finditer(model)}
-    # First build item / assemble item of each object, in build order.
+    extra = set(model_objs) - {src_id}
+    if extra:
+        extra = ", ".join(repr(meta_value(cfg_objs.get(o, ""), "name") or f"id {o}")
+                          for o in sorted(extra, key=int))
+        sys.exit(f"expected only the plate's object in the model, found extra (off-plate?): {extra}")
+
+    # Build items of each object, in build order (index = instance_id; src_idx
+    # below relies on the order); assemble items keyed by (object_id, instance_id).
     items, assemble = {}, {}
     for m in ITEM_RE.finditer(model):
-        items.setdefault(m.group(1), m.group(0))
+        items.setdefault(m.group(1), []).append(m.group(0))
     for m in ASSEMBLE_RE.finditer(cfg):
-        assemble.setdefault(m.group(1), m.group(0))
+        assemble[(m.group(1), m.group(2))] = m.group(0)
 
     next_id = max(map(int, model_objs)) + 1
     # Also unique per file: the object UUID ordinal prefix (see renumber_uuids)
@@ -267,28 +329,37 @@ def build(zin, variants, plate_name):
     next_ordinal = max(int(u, 16) for u in
                        re.findall(r'<object [^>]*p:UUID="([0-9a-f]{8})', model)) + 1
     next_identify = max(int(v) for v in re.findall(r'key="identify_id" value="(\d+)"', cfg)) + 1
+    if "<text_info" in cfg_objs[src_id]:
+        sys.exit("re-save the reference in OrcaSlicer to convert its text")
     # Part ids in the config are the component objectids in 3dmodel.model;
     # text part id -> the shape's fix transform, if any.
     text_parts = {}
     for m in PART_RE.finditer(cfg_objs[src_id]):
         if "<slic3rpe:text" in m.group(0):
+            part_id = attr(m.group(0), "id")
             shape = SHAPE_RE.search(m.group(0))
-            fix = shape and re.search(r'\btransform="([^"]*)"', shape.group(0))
-            text_parts[re.search(r'<part id="(\d+)"', m.group(0)).group(1)] = (
-                list(map(float, fix.group(1).split())) if fix else None)
+            if not shape:
+                sys.exit(f"text part {part_id} has no <slic3rpe:shape>, so Orca can't rebuild it")
+            fix = re.search(r'\btransform="([^"]*)"', shape.group(0))
+            text_parts[part_id] = floats(fix.group(1)) if fix else None
     # Like Orca's bounding box, the footprint counts only model parts, not
     # modifiers, negative volumes or support blockers/enforcers.
     subtypes = dict(re.findall(r'<part id="(\d+)" subtype="([^"]*)"', cfg_objs[src_id]))
     skip = {i for i, t in subtypes.items() if t != "normal_part"}
-    src_xform = re.search(r'transform="([^"]*)"', items[src_id]).group(1).split()
+    # The build item and assemble item for the instance actually on the plate,
+    # which need not be instance 0 (e.g. instance 0 sits on another plate).
+    k = int(meta_value(instances[0], "instance_id"))
+    src_item = items[src_id][k]
+    src_xform = attr(src_item, "transform").split()
     # The reference's sub-model files, read once for the footprint and text parts.
-    src_submodels = {p: zin.read(p.lstrip("/")).decode("utf-8")
+    # p:path is XML-escaped, but the zip entry name is raw.
+    src_submodels = {p: zin.read(html.unescape(p).lstrip("/")).decode("utf-8")
                      for p in dict.fromkeys(COMPONENT_PATH_RE.findall(model_objs[src_id]))}
     spots, fits = grid(len(variants), footprint(src_submodels, model_objs[src_id],
-                                                list(map(float, src_xform[:9])), skip), bed)
+                                                [float(v) for v in src_xform[:9]], skip), bed, exclude)
     submodels = {}  # new sub-model files: path -> contents
     # Orca names sub-model files "<name>_<n>.model"; keep <n> unique across the project.
-    next_file = max((int(m.group(1)) for n in zin.namelist()
+    next_file = max((int(m.group(1)) for n in names
                      if (m := re.search(r'_(\d+)\.model$', n))), default=0) + 1
     new_obj = new_item = new_cfg = new_inst = new_asm = ""
     for n, (name, text, settings) in enumerate(variants):
@@ -301,14 +372,17 @@ def build(zin, variants, plate_name):
             next_file += 1
             obj, submodels[path] = empty_text_mesh(src_submodels, obj, text_id, fix, path)
         new_obj += obj
-        item = set_attr(items[src_id], "objectid", oid)
+        item = set_attr(src_item, "objectid", oid)
         item = re.sub(r'(p:UUID=")[0-9a-f]{8}', rf"\g<1>{int(oid):08x}", item, count=1)
         new_item += set_attr(item, "transform", " ".join(placed))
         new_cfg += relabel(cfg_objs[src_id], oid, name, text, settings)
-        inst = re.sub(r'(key="object_id" value=")\d+', rf"\g<1>{oid}", instances[0])
-        new_inst += re.sub(r'(key="identify_id" value=")\d+', rf"\g<1>{next_identify + n}", inst)
-        if src_id in assemble:
-            new_asm += set_attr(assemble[src_id], "object_id", oid)
+        # Each copy is a single instance, so it's instance 0.
+        inst = set_meta(instances[0], "object_id", oid)
+        inst = set_meta(inst, "instance_id", "0")
+        new_inst += set_meta(inst, "identify_id", str(next_identify + n))
+        if (src_id, str(k)) in assemble:
+            asm = set_attr(assemble[(src_id, str(k))], "object_id", oid)
+            new_asm += set_attr(asm, "instance_id", "0")
 
     # 3dmodel.model: replace all objects and items with the copies.
     model = ITEM_RE.sub("", MODEL_OBJ_RE.sub("", model))
@@ -319,21 +393,33 @@ def build(zin, variants, plate_name):
     first_obj = CFG_OBJ_RE.search(cfg).start()
     cfg = cfg[:first_obj] + new_cfg + CFG_OBJ_RE.sub("", cfg[first_obj:])
     new_plate = rename_plate(INSTANCE_RE.sub("", ref_plate), plate_name)
-    new_plate = new_plate.replace("  </plate>\n", new_inst + "  </plate>\n")
+    new_plate = new_plate.replace("  </plate>\n", new_inst + "  </plate>\n", 1)
     cfg = cfg.replace(ref_plate, new_plate, 1)
     cfg = ASSEMBLE_RE.sub("", cfg)
     cfg = cfg.replace("  </assemble>\n", new_asm + "  </assemble>\n", 1)
 
-    # Sub-model files no longer referenced by any component.
-    used = set(COMPONENT_PATH_RE.findall(model))
-    all_paths = {"/" + n for n in zin.namelist() if n.startswith("3D/Objects/")}
+    # Sub-model files no longer referenced by any component. p:path is
+    # XML-escaped; unescape it to compare against the raw zip entry names.
+    used = {html.unescape(p) for p in COMPONENT_PATH_RE.findall(model)}
+    all_paths = {"/" + n for n in names if n.startswith("3D/Objects/")}
     dropped = {p.lstrip("/") for p in all_paths - used}
 
+    # A kept reference file's original text mesh is itself no longer
+    # referenced (each copy points at its own empty-mesh file instead);
+    # prune that dead object so Orca doesn't parse and discard it every time.
+    referenced = set(re.findall(r'p:path="([^"]+)" objectid="(\d+)"', model))
+    pruned = {}
+    for path in used & src_submodels.keys():
+        body = MODEL_OBJ_RE.sub(lambda m: m.group(0) if (path, m.group(1)) in referenced else "",
+                                src_submodels[path])
+        if body != src_submodels[path]:
+            pruned[path.lstrip("/")] = body
+
     out = {MODEL: model, CONFIG: cfg}
-    if MODEL_RELS in zin.namelist():
+    if MODEL_RELS in names:
         rels = zin.read(MODEL_RELS).decode("utf-8")
-        rels = REL_RE.sub(lambda m: "" if m.group(1).startswith("/3D/Objects/") and m.group(1) not in used
-                          else m.group(0), rels)
+        rels = REL_RE.sub(lambda m: "" if m.group(1).startswith("/3D/Objects/")
+                          and html.unescape(m.group(1)) not in used else m.group(0), rels)
         next_rel = max(map(int, re.findall(r'Id="rel-(\d+)"', rels)), default=0) + 1
         new_rels = "".join(
             f' <Relationship Target="{path}" Id="rel-{next_rel + i}" '
@@ -341,44 +427,59 @@ def build(zin, variants, plate_name):
             for i, path in enumerate(submodels))
         out[MODEL_RELS] = rels.replace("</Relationships>", new_rels + "</Relationships>", 1)
     out.update({path.lstrip("/"): body for path, body in submodels.items()})
+    out.update(pruned)
 
-    # Height ranges and variable layer height profiles are keyed by 1-based
-    # object index in build order; every copy gets the reference's.
+    # Height ranges, cut information, variable layer height profiles and brim
+    # ear points are all keyed by 1-based object index in build order; every
+    # copy gets the reference's, or the file is dropped if it has none.
     src_idx = str(list(items).index(src_id) + 1)
-    if RANGES in zin.namelist():
+    if RANGES in names:
         ranges = zin.read(RANGES).decode("utf-8")
-        block = next((m.group(0) for m in RANGE_OBJ_RE.finditer(ranges) if m.group(1) == src_idx), None)
-        body = "".join(set_attr(block, "id", str(i)) for i in range(1, len(variants) + 1)) if block else ""
-        first = RANGE_OBJ_RE.search(ranges)
-        head = ranges[:first.start()] if first else ranges.replace("</objects>", "")
-        out[RANGES] = head + body + "</objects>\n"
-    if PROFILES in zin.namelist():
-        # One "object_id=N|z0;h0;z1;h1;..." line per object.
-        profile = re.search(rf"^object_id={src_idx}\|(.*)$", zin.read(PROFILES).decode("utf-8"), re.M)
-        if profile:
-            out[PROFILES] = "".join(f"object_id={i}|{profile.group(1)}\n" for i in range(1, len(variants) + 1))
+        block = next((m.group(0) for m in XML_OBJ_RE.finditer(ranges) if m.group(1) == src_idx), None)
+        if block:
+            body = "".join(set_attr(block, "id", str(i)) for i in range(1, len(variants) + 1))
+            out[RANGES] = ranges[:XML_OBJ_RE.search(ranges).start()] + body + "</objects>\n"
         else:
-            dropped.add(PROFILES)
+            dropped.add(RANGES)
+    if CUT_INFO in names:
+        cut = zin.read(CUT_INFO).decode("utf-8")
+        block = next((m.group(0) for m in XML_OBJ_RE.finditer(cut) if m.group(1) == src_idx), None)
+        cut_id = block and re.search(r'<cut_id id="(\d+)"', block)
+        if cut_id and cut_id.group(1) != "0":
+            # The copies would all share the reference's cut id, linking them
+            # as parts of one cut, which isn't a sensible reference.
+            sys.exit("reference object is part of a cut; not a sensible reference")
+        dropped.add(CUT_INFO)
+    for path in (PROFILES, BRIM_EARS):
+        if path in names:
+            lines = reindex_lines(zin.read(path).decode("utf-8"), src_idx, len(variants))
+            if lines is None:
+                dropped.add(path)
+            else:
+                out[path] = lines
 
-    return out, dropped, fits
+    return out, dropped, fits, bool(text_parts), names
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("reference", help="reference project")
     ap.add_argument("output", help="output project, overwritten if it exists")
-    ap.add_argument("count", type=int, help="number of copies")
+    ap.add_argument("count", type=int, help="number of copies; COUNT - 1 must divide MAX_DENSITY - MIN_DENSITY")
     ap.add_argument("flow", type=flow_ratio, help="bridge flow ratio, 1.0 to 1.9 in steps of 0.1")
     ap.add_argument("min_density", type=density_percent, help="first bridge density, integer percent, 10 to 125")
     ap.add_argument("max_density", type=density_percent, help="last bridge density, integer percent, 10 to 125")
     args = ap.parse_args()
+    if os.path.exists(args.output) and os.path.samefile(args.reference, args.output):
+        ap.error("output must differ from the reference")
     if args.count < 1:
         ap.error("count must be at least 1")
     span = abs(args.max_density - args.min_density)
     if args.count > 1 and not span:
-        ap.error(f"count {args.count} needs different min and max densities, or the copies are identical")
+        ap.error(f"count {args.count} needs different min and max densities; "
+                 "otherwise the copies would be identical")
     if args.count == 1 and span:
-        ap.error("count 1 needs equal min and max densities, or max is ignored")
+        ap.error("count 1 needs equal min and max densities")
     if args.count > 1 and span % (args.count - 1):
         # count - 1 steps must divide the span, so valid counts are d + 1 for divisors d of span.
         valid = [d + 1 for d in range(1, span + 1) if span % d == 0]
@@ -386,11 +487,12 @@ def main():
                  f"{args.max_density}; valid counts: " + ", ".join(map(str, valid)))
 
     flow = fmt(args.flow)
+    tenths = round(args.flow * 10) % 10
     step = (args.max_density - args.min_density) // max(args.count - 1, 1)
     variants = []
     for n in range(args.count):
         density = str(args.min_density + step * n)
-        variants.append((f"{flow}-{density}", f"{flow[2:] or 0}-{density}", {
+        variants.append((f"{flow}-{density}", f"{tenths}-{density}", {
             "bridge_flow": flow,
             "internal_bridge_flow": flow,
             "bridge_density": f"{density}%",
@@ -398,8 +500,7 @@ def main():
 
     tmp = args.output + ".tmp"
     with zipfile.ZipFile(args.reference) as zin:
-        out, dropped, fits = build(zin, variants, f"Flow Factor {flow}")
-        names = set(zin.namelist())
+        out, dropped, fits, has_text, names = build(zin, variants, f"Flow Factor {flow}")
         # New entries take the reference model's timestamp so output is reproducible.
         date_time = zin.getinfo(MODEL).date_time
         zout = zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED)
@@ -413,18 +514,19 @@ def main():
                 for name in out:
                     if name not in names:
                         info = zipfile.ZipInfo(name, date_time)
-                        info.external_attr = 0o600 << 16
                         zout.writestr(info, out[name].encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
-            shutil.move(tmp, args.output)
+            os.replace(tmp, args.output)
         except BaseException:
-            os.remove(tmp)
+            if os.path.exists(tmp):
+                os.remove(tmp)
             raise
 
-    print("note: text labels need OrcaSlicer branch text-rebuild/integration; "
-          "stock Orca drops them", file=sys.stderr)
+    if has_text:
+        print("note: text labels need OrcaSlicer branch text-rebuild/integration; "
+              "stock Orca drops them", file=sys.stderr)
 
-    if not fits:
-        print("copies don't fit on the plate; arrange it in the slicer", file=sys.stderr)
+    if not fits:  # also true if a copy overlaps bed_exclude_area
+        print("warning: copies don't fit on the plate; arrange it in the slicer", file=sys.stderr)
 
 
 if __name__ == "__main__":
