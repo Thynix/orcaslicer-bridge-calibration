@@ -252,6 +252,11 @@ def build(zin, variants, plate_name):
     src_id = plate_ids[0]
 
     model_objs = {m.group(1): m.group(0) for m in MODEL_OBJ_RE.finditer(model)}
+    extra = set(model_objs) - {src_id}
+    if extra:
+        names = ", ".join(repr(meta_value(cfg_objs[o], "name")) for o in sorted(extra, key=int))
+        sys.exit(f"expected only the plate's object in the model, found extra (off-plate?): {names}")
+
     # First build item / assemble item of each object, in build order.
     items, assemble = {}, {}
     for m in ITEM_RE.finditer(model):
