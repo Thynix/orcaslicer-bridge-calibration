@@ -26,7 +26,6 @@ import json
 import math
 import os
 import re
-import shutil
 import sys
 import zipfile
 
@@ -372,6 +371,8 @@ def main():
     ap.add_argument("min_density", type=density_percent, help="first bridge density, integer percent, 10 to 125")
     ap.add_argument("max_density", type=density_percent, help="last bridge density, integer percent, 10 to 125")
     args = ap.parse_args()
+    if os.path.exists(args.output) and os.path.samefile(args.reference, args.output):
+        ap.error("output must differ from the reference")
     if args.count < 1:
         ap.error("count must be at least 1")
     span = abs(args.max_density - args.min_density)
@@ -415,9 +416,10 @@ def main():
                         info = zipfile.ZipInfo(name, date_time)
                         info.external_attr = 0o600 << 16
                         zout.writestr(info, out[name].encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
-            shutil.move(tmp, args.output)
+            os.replace(tmp, args.output)
         except BaseException:
-            os.remove(tmp)
+            if os.path.exists(tmp):
+                os.remove(tmp)
             raise
 
     print("note: text labels need OrcaSlicer branch text-rebuild/integration; "
