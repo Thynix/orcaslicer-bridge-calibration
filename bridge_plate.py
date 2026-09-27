@@ -403,6 +403,8 @@ def build(zin, variants, plate_name, keep_text_mesh=False):
     skip = {i for i, t in subtypes.items() if t != "normal_part"}
     # The build item and assemble item for the instance actually on the plate,
     # which need not be instance 0 (e.g. instance 0 sits on another plate).
+    if "instance_id" not in instances[0]:
+        sys.exit("model_instance has no instance_id; re-save the reference in a recent OrcaSlicer")
     k = int(meta_value(instances[0], "instance_id"))
     if k >= len(items.get(src_id, [])):
         sys.exit(f"plate instance has instance_id {k}, but object {src_id} has no matching build item")
