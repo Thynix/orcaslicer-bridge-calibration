@@ -73,6 +73,22 @@ def fmt(value):
     return f"{round(value, 4):g}"
 
 
+def flow_ratio(text):
+    # Orca's bridge_flow range is (0, 2]; one decimal because the label keeps only tenths.
+    value = float(text)
+    if not (math.isfinite(value) and 0 < value <= 2 and abs(value * 10 - round(value * 10)) < 1e-9):
+        raise argparse.ArgumentTypeError(f"{text!r} is not a flow ratio from 0.1 to 2 with at most one decimal")
+    return round(value, 1)
+
+
+def density_percent(text):
+    # Orca's bridge_density range.
+    value = int(text)
+    if not 10 <= value <= 125:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a density from 10 to 125")
+    return value
+
+
 def relabel(obj_cfg, oid, label, settings):
     """Return a config <object> block with a new id, settings, and name, part names and text set to label."""
     obj_cfg = set_attr(obj_cfg, "id", oid)
@@ -342,17 +358,22 @@ def main():
     ap.add_argument("reference", help="reference project")
     ap.add_argument("output", help="output project, overwritten if it exists")
     ap.add_argument("count", type=int, help="number of copies")
-    ap.add_argument("flow", type=float, help="bridge flow ratio")
-    ap.add_argument("min_density", type=int, help="first bridge density, integer percent")
-    ap.add_argument("max_density", type=int, help="last bridge density, integer percent")
+    ap.add_argument("flow", type=flow_ratio, help="bridge flow ratio, 0.1 to 2 in steps of 0.1")
+    ap.add_argument("min_density", type=density_percent, help="first bridge density, integer percent, 10 to 125")
+    ap.add_argument("max_density", type=density_percent, help="last bridge density, integer percent, 10 to 125")
     args = ap.parse_args()
     if args.count < 1:
         ap.error("count must be at least 1")
     span = abs(args.max_density - args.min_density)
+    if args.count > 1 and not span:
+        ap.error(f"count {args.count} needs different min and max densities")
+    if args.count == 1 and span:
+        ap.error("count 1 needs equal min and max densities")
     if args.count > 1 and span % (args.count - 1):
+        # count - 1 steps must divide the span, so valid counts are d + 1 for divisors d of span.
         valid = [d + 1 for d in range(1, span + 1) if span % d == 0]
         ap.error(f"count {args.count} gives non-integer densities from {args.min_density} to "
-                 f"{args.max_density}; valid counts: 1, " + ", ".join(map(str, valid)))
+                 f"{args.max_density}; valid counts: " + ", ".join(map(str, valid)))
 
     flow = fmt(args.flow)
     step = (args.max_density - args.min_density) // max(args.count - 1, 1)
