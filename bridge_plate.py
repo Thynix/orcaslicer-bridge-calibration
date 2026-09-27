@@ -280,7 +280,8 @@ def build(zin, variants, plate_name):
     skip = {i for i, t in subtypes.items() if t != "normal_part"}
     src_xform = re.search(r'transform="([^"]*)"', items[src_id]).group(1).split()
     # The reference's sub-model files, read once for the footprint and text parts.
-    src_submodels = {p: zin.read(p.lstrip("/")).decode("utf-8")
+    # p:path is XML-escaped, but the zip entry name is raw.
+    src_submodels = {p: zin.read(html.unescape(p).lstrip("/")).decode("utf-8")
                      for p in dict.fromkeys(COMPONENT_PATH_RE.findall(model_objs[src_id]))}
     spots, fits = grid(len(variants), footprint(src_submodels, model_objs[src_id],
                                                 list(map(float, src_xform[:9])), skip), bed)
@@ -322,16 +323,17 @@ def build(zin, variants, plate_name):
     cfg = ASSEMBLE_RE.sub("", cfg)
     cfg = cfg.replace("  </assemble>\n", new_asm + "  </assemble>\n", 1)
 
-    # Sub-model files no longer referenced by any component.
-    used = set(COMPONENT_PATH_RE.findall(model))
+    # Sub-model files no longer referenced by any component. p:path is
+    # XML-escaped; unescape it to compare against the raw zip entry names.
+    used = {html.unescape(p) for p in COMPONENT_PATH_RE.findall(model)}
     all_paths = {"/" + n for n in zin.namelist() if n.startswith("3D/Objects/")}
     dropped = {p.lstrip("/") for p in all_paths - used}
 
     out = {MODEL: model, CONFIG: cfg}
     if MODEL_RELS in zin.namelist():
         rels = zin.read(MODEL_RELS).decode("utf-8")
-        rels = REL_RE.sub(lambda m: "" if m.group(1).startswith("/3D/Objects/") and m.group(1) not in used
-                          else m.group(0), rels)
+        rels = REL_RE.sub(lambda m: "" if m.group(1).startswith("/3D/Objects/")
+                          and html.unescape(m.group(1)) not in used else m.group(0), rels)
         next_rel = max(map(int, re.findall(r'Id="rel-(\d+)"', rels)), default=0) + 1
         new_rels = "".join(
             f' <Relationship Target="{path}" Id="rel-{next_rel + i}" '
