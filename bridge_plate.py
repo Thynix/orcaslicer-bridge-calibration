@@ -14,10 +14,11 @@ set to "TENTHS-DENSITY", where TENTHS is the first decimal digit of FLOW, e.g.
 TENTHS identifies it. The plate is named "Flow Factor FLOW".
 
 Each copy's text part gets its own sub-model file holding an empty mesh, which
-a patched OrcaSlicer (branch text-rebuild/integration) rebuilds from the text
-settings on load. Its component transform becomes the text frame, comp * T(c) *
-fix^-1 (c: centre of the old mesh's bounding box, fix: the shape's transform,
-which is dropped). Stock Orca drops such text parts.
+a patched OrcaSlicer (branch text-rebuild/integration, 14b41380ed) rebuilds from
+the text settings on load. Its component transform becomes the text frame, comp *
+T(c) * fix^-1 (c: centre of the old mesh's bounding box, fix: the shape's
+transform, which is dropped). Stock Orca silently drops such text parts, leaving
+the copies unlabelled.
 """
 import argparse
 import html
@@ -415,6 +416,9 @@ def main():
         except BaseException:
             os.remove(tmp)
             raise
+
+    print("note: text labels need OrcaSlicer branch text-rebuild/integration; "
+          "stock Orca drops them", file=sys.stderr)
 
     if not fits:
         print("copies don't fit on the plate; arrange it in the slicer", file=sys.stderr)
