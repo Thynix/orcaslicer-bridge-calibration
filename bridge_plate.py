@@ -7,9 +7,11 @@ The reference project must have one plate holding one object. OUT.3mf
 (overwritten if it exists) is the reference project with that object replaced
 by COUNT copies of it laid out in a grid, with bridge_flow and
 internal_bridge_flow set to FLOW and bridge_density stepping from MIN_DENSITY
-to MAX_DENSITY (percent, inclusive). Each copy's name, part names and text are
+to MAX_DENSITY (percent, inclusive). Each copy is named "FLOW-DENSITY", e.g.
+"1.3-104" for flow 1.3 and density 104%. Its text parts' text and names are
 set to "TENTHS-DENSITY", where TENTHS is the first decimal digit of FLOW, e.g.
-"3-104" for flow 1.3 and density 104%. The plate is named "Flow Factor FLOW".
+"3-104"; other part names are kept. FLOW must be 1.0 to 1.9 in steps of 0.1 so
+TENTHS identifies it. The plate is named "Flow Factor FLOW".
 
 Each copy's text part gets its own sub-model file holding an empty mesh, which
 a patched OrcaSlicer (branch text-rebuild/integration) rebuilds from the text
@@ -74,10 +76,11 @@ def fmt(value):
 
 
 def flow_ratio(text):
-    # Orca's bridge_flow range is (0, 2]; one decimal because the label keeps only tenths.
+    # The text shows only the tenths to fit the tile's text area, so the flow
+    # must be one of 1.0-1.9 for them to identify it (within Orca's (0, 2]).
     value = float(text)
-    if not (math.isfinite(value) and 0 < value <= 2 and abs(value * 10 - round(value * 10)) < 1e-9):
-        raise argparse.ArgumentTypeError(f"{text!r} is not a flow ratio from 0.1 to 2 with at most one decimal")
+    if not (math.isfinite(value) and 1 <= value <= 1.9 and abs(value * 10 - round(value * 10)) < 1e-9):
+        raise argparse.ArgumentTypeError(f"{text!r} is not a flow ratio from 1.0 to 1.9 in steps of 0.1")
     return round(value, 1)
 
 
@@ -89,8 +92,9 @@ def density_percent(text):
     return value
 
 
-def relabel(obj_cfg, oid, label, settings):
-    """Return a config <object> block with a new id, settings, and name, part names and text set to label."""
+def relabel(obj_cfg, oid, name, text, settings):
+    """Return a config <object> block with a new id, settings and name, and its
+    text parts' text and names set to TEXT."""
     obj_cfg = set_attr(obj_cfg, "id", oid)
     # head is the <object> line and its object-level metadata; rest is the parts
     # and closing tag.
@@ -104,14 +108,16 @@ def relabel(obj_cfg, oid, label, settings):
     meta_items = [(k, meta[k]) for k in sorted(meta)]
     head = OBJ_META_RE.sub("", head) + "".join(
         f'    <metadata key="{k}" value="{html.escape(v, quote=True)}"/>\n'
-        for k, v in [("name", label)] + meta_items)
-    esc = html.escape(label, quote=True)
+        for k, v in [("name", name)] + meta_items)
+    esc = html.escape(text, quote=True)
 
     def relabel_part(m):
-        part = re.sub(r'(<metadata key="name" value=")[^"]*', rf"\g<1>{esc}", m.group(0), count=1)
-        if "<slic3rpe:text" in part:
-            # The fix transform is folded into the component transform by empty_text_mesh.
-            part = SHAPE_RE.sub(lambda s: re.sub(r' transform="[^"]*"', "", s.group(0)), part)
+        part = m.group(0)
+        if "<slic3rpe:text" not in part:
+            return part
+        part = re.sub(r'(<metadata key="name" value=")[^"]*', rf"\g<1>{esc}", part, count=1)
+        # The fix transform is folded into the component transform by empty_text_mesh.
+        part = SHAPE_RE.sub(lambda s: re.sub(r' transform="[^"]*"', "", s.group(0)), part)
         return TEXT_RE.sub(lambda t: f'{t.group(1)}{esc}"', part)
 
     return head + PART_RE.sub(relabel_part, rest)
@@ -281,20 +287,20 @@ def build(zin, variants, plate_name):
     next_file = max((int(m.group(1)) for n in zin.namelist()
                      if (m := re.search(r'_(\d+)\.model$', n))), default=0) + 1
     new_obj = new_item = new_cfg = new_inst = new_asm = ""
-    for n, (label, settings) in enumerate(variants):
+    for n, (name, text, settings) in enumerate(variants):
         oid = str(next_id + n)
         placed = src_xform[:]
         placed[9:11] = (f"{v:.6g}" for v in spots[n])  # mm; not a setting, so not fmt()
         obj = renumber_uuids(set_attr(model_objs[src_id], "id", oid), next_ordinal + n)
         for text_id, fix in text_parts.items():
-            path = f"/3D/Objects/{label}_{next_file}.model"
+            path = f"/3D/Objects/{name}_{next_file}.model"
             next_file += 1
             obj, submodels[path] = empty_text_mesh(src_submodels, obj, text_id, fix, path)
         new_obj += obj
         item = set_attr(items[src_id], "objectid", oid)
         item = re.sub(r'(p:UUID=")[0-9a-f]{8}', rf"\g<1>{int(oid):08x}", item, count=1)
         new_item += set_attr(item, "transform", " ".join(placed))
-        new_cfg += relabel(cfg_objs[src_id], oid, label, settings)
+        new_cfg += relabel(cfg_objs[src_id], oid, name, text, settings)
         inst = re.sub(r'(key="object_id" value=")\d+', rf"\g<1>{oid}", instances[0])
         new_inst += re.sub(r'(key="identify_id" value=")\d+', rf"\g<1>{next_identify + n}", inst)
         if src_id in assemble:
@@ -346,7 +352,7 @@ def build(zin, variants, plate_name):
         # One "object_id=N|z0;h0;z1;h1;..." line per object.
         profile = re.search(rf"^object_id={src_idx}\|(.*)$", zin.read(PROFILES).decode("utf-8"), re.M)
         if profile:
-            out[PROFILES] = "".join(f"object_id={i}|{profile.group(1)}\n" for i in range(1, len(labels) + 1))
+            out[PROFILES] = "".join(f"object_id={i}|{profile.group(1)}\n" for i in range(1, len(variants) + 1))
         else:
             dropped.add(PROFILES)
 
@@ -358,7 +364,7 @@ def main():
     ap.add_argument("reference", help="reference project")
     ap.add_argument("output", help="output project, overwritten if it exists")
     ap.add_argument("count", type=int, help="number of copies")
-    ap.add_argument("flow", type=flow_ratio, help="bridge flow ratio, 0.1 to 2 in steps of 0.1")
+    ap.add_argument("flow", type=flow_ratio, help="bridge flow ratio, 1.0 to 1.9 in steps of 0.1")
     ap.add_argument("min_density", type=density_percent, help="first bridge density, integer percent, 10 to 125")
     ap.add_argument("max_density", type=density_percent, help="last bridge density, integer percent, 10 to 125")
     args = ap.parse_args()
@@ -380,8 +386,7 @@ def main():
     variants = []
     for n in range(args.count):
         density = str(args.min_density + step * n)
-        # tenths to save space
-        variants.append((f"{int(args.flow*10)%10}-{density}", {
+        variants.append((f"{flow}-{density}", f"{flow[2:] or 0}-{density}", {
             "bridge_flow": flow,
             "internal_bridge_flow": flow,
             "bridge_density": f"{density}%",
