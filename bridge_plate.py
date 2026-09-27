@@ -48,7 +48,7 @@ COMPONENT_PATH_RE = re.compile(r'<component p:path="([^"]+)"')
 CFG_OBJ_RE = re.compile(r'^  <object id="(\d+)">.*?^  </object>\n', re.M | re.S)
 PLATE_RE = re.compile(r"^  <plate>.*?^  </plate>\n", re.M | re.S)
 INSTANCE_RE = re.compile(r"^    <model_instance>.*?^    </model_instance>\n", re.M | re.S)
-ASSEMBLE_RE = re.compile(r'^   <assemble_item object_id="(\d+)"[^>]*/>\n', re.M)
+ASSEMBLE_RE = re.compile(r'^   <assemble_item object_id="(\d+)" instance_id="(\d+)"[^>]*/>\n', re.M)
 # layer_config_ranges.xml and cut_information.xml are both boost::ptree XML
 # with the same beautified indentation.
 XML_OBJ_RE = re.compile(r'^ <object id="(\d+)">.*?^ </object>\n', re.M | re.S)
@@ -281,13 +281,13 @@ def build(zin, variants, plate_name):
         names = ", ".join(repr(meta_value(cfg_objs[o], "name")) for o in sorted(extra, key=int))
         sys.exit(f"expected only the plate's object in the model, found extra (off-plate?): {names}")
 
-    # First build item of each object, in build order (src_idx below relies on it),
-    # and first assemble item.
+    # Build items of each object, in build order (index = instance_id; src_idx
+    # below relies on the order); assemble items keyed by (object_id, instance_id).
     items, assemble = {}, {}
     for m in ITEM_RE.finditer(model):
-        items.setdefault(m.group(1), m.group(0))
+        items.setdefault(m.group(1), []).append(m.group(0))
     for m in ASSEMBLE_RE.finditer(cfg):
-        assemble.setdefault(m.group(1), m.group(0))
+        assemble[(m.group(1), m.group(2))] = m.group(0)
 
     next_id = max(map(int, model_objs)) + 1
     # Also unique per file: the object UUID ordinal prefix (see renumber_uuids)
@@ -308,7 +308,11 @@ def build(zin, variants, plate_name):
     # modifiers, negative volumes or support blockers/enforcers.
     subtypes = dict(re.findall(r'<part id="(\d+)" subtype="([^"]*)"', cfg_objs[src_id]))
     skip = {i for i, t in subtypes.items() if t != "normal_part"}
-    src_xform = re.search(r'transform="([^"]*)"', items[src_id]).group(1).split()
+    # The build item and assemble item for the instance actually on the plate,
+    # which need not be instance 0 (e.g. instance 0 sits on another plate).
+    k = int(meta_value(instances[0], "instance_id"))
+    src_item = items[src_id][k]
+    src_xform = re.search(r'transform="([^"]*)"', src_item).group(1).split()
     # The reference's sub-model files, read once for the footprint and text parts.
     # p:path is XML-escaped, but the zip entry name is raw.
     src_submodels = {p: zin.read(html.unescape(p).lstrip("/")).decode("utf-8")
@@ -330,14 +334,17 @@ def build(zin, variants, plate_name):
             next_file += 1
             obj, submodels[path] = empty_text_mesh(src_submodels, obj, text_id, fix, path)
         new_obj += obj
-        item = set_attr(items[src_id], "objectid", oid)
+        item = set_attr(src_item, "objectid", oid)
         item = re.sub(r'(p:UUID=")[0-9a-f]{8}', rf"\g<1>{int(oid):08x}", item, count=1)
         new_item += set_attr(item, "transform", " ".join(placed))
         new_cfg += relabel(cfg_objs[src_id], oid, name, text, settings)
+        # Each copy is a single instance, so it's instance 0.
         inst = re.sub(r'(key="object_id" value=")\d+', rf"\g<1>{oid}", instances[0])
+        inst = re.sub(r'(key="instance_id" value=")\d+', r"\g<1>0", inst)
         new_inst += re.sub(r'(key="identify_id" value=")\d+', rf"\g<1>{next_identify + n}", inst)
-        if src_id in assemble:
-            new_asm += set_attr(assemble[src_id], "object_id", oid)
+        if (src_id, str(k)) in assemble:
+            asm = set_attr(assemble[(src_id, str(k))], "object_id", oid)
+            new_asm += set_attr(asm, "instance_id", "0")
 
     # 3dmodel.model: replace all objects and items with the copies.
     model = ITEM_RE.sub("", MODEL_OBJ_RE.sub("", model))
