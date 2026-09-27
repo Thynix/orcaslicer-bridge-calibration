@@ -34,7 +34,9 @@ MODEL = "3D/3dmodel.model"
 MODEL_RELS = "3D/_rels/3dmodel.model.rels"
 CONFIG = "Metadata/model_settings.config"
 RANGES = "Metadata/layer_config_ranges.xml"
+CUT_INFO = "Metadata/cut_information.xml"
 PROFILES = "Metadata/layer_heights_profile.txt"
+BRIM_EARS = "Metadata/brim_ear_points.txt"
 PROJECT = "Metadata/project_settings.config"
 GAP = 5  # minimum mm between copies
 
@@ -47,7 +49,9 @@ CFG_OBJ_RE = re.compile(r'^  <object id="(\d+)">.*?^  </object>\n', re.M | re.S)
 PLATE_RE = re.compile(r"^  <plate>.*?^  </plate>\n", re.M | re.S)
 INSTANCE_RE = re.compile(r"^    <model_instance>.*?^    </model_instance>\n", re.M | re.S)
 ASSEMBLE_RE = re.compile(r'^   <assemble_item object_id="(\d+)"[^>]*/>\n', re.M)
-RANGE_OBJ_RE = re.compile(r'^ <object id="(\d+)">.*?^ </object>\n', re.M | re.S)
+# layer_config_ranges.xml and cut_information.xml are both boost::ptree XML
+# with the same beautified indentation.
+XML_OBJ_RE = re.compile(r'^ <object id="(\d+)">.*?^ </object>\n', re.M | re.S)
 REL_RE = re.compile(r'^ <Relationship Target="([^"]+)"[^>]*/>\n', re.M)
 OBJ_META_RE = re.compile(r'^    <metadata key="([^"]+)" value="[^"]*"/>\n', re.M)
 PART_RE = re.compile(r"^    <part .*?^    </part>\n", re.M | re.S)
@@ -220,6 +224,19 @@ def rename_plate(plate, name):
     return plate
 
 
+def reindex_lines(text, src_idx, count):
+    """TEXT is an "object_id=N|..." file (layer_heights_profile.txt or
+    brim_ear_points.txt) with one line per 1-based object index in build
+    order, plus optional non-"object_id=" header lines (e.g.
+    brim_points_format_version=). Return it with the reference object's own
+    line, if any, replicated to ids 1..COUNT; or None if it has none."""
+    line = re.search(rf"^object_id={src_idx}\|(.*)$", text, re.M)
+    if not line:
+        return None
+    header = "".join(l + "\n" for l in text.splitlines() if not l.startswith("object_id="))
+    return header + "".join(f"object_id={i}|{line.group(1)}\n" for i in range(1, count + 1))
+
+
 def grid(count, box, bed):
     """X/Y translations spreading COUNT objects with footprint BOX evenly over
     the bed, and whether they keep GAP apart and inside it."""
@@ -355,23 +372,34 @@ def build(zin, variants, plate_name):
         out[MODEL_RELS] = rels.replace("</Relationships>", new_rels + "</Relationships>", 1)
     out.update({path.lstrip("/"): body for path, body in submodels.items()})
 
-    # Height ranges and variable layer height profiles are keyed by 1-based
-    # object index in build order; every copy gets the reference's.
+    # Height ranges, cut information, variable layer height profiles and brim
+    # ear points are all keyed by 1-based object index in build order; every
+    # copy gets the reference's, or the file is dropped if it has none.
     src_idx = str(list(items).index(src_id) + 1)
     if RANGES in zin.namelist():
         ranges = zin.read(RANGES).decode("utf-8")
-        block = next((m.group(0) for m in RANGE_OBJ_RE.finditer(ranges) if m.group(1) == src_idx), None)
-        body = "".join(set_attr(block, "id", str(i)) for i in range(1, len(variants) + 1)) if block else ""
-        first = RANGE_OBJ_RE.search(ranges)
-        head = ranges[:first.start()] if first else ranges.replace("</objects>", "")
-        out[RANGES] = head + body + "</objects>\n"
-    if PROFILES in zin.namelist():
-        # One "object_id=N|z0;h0;z1;h1;..." line per object.
-        profile = re.search(rf"^object_id={src_idx}\|(.*)$", zin.read(PROFILES).decode("utf-8"), re.M)
-        if profile:
-            out[PROFILES] = "".join(f"object_id={i}|{profile.group(1)}\n" for i in range(1, len(variants) + 1))
+        block = next((m.group(0) for m in XML_OBJ_RE.finditer(ranges) if m.group(1) == src_idx), None)
+        if block:
+            body = "".join(set_attr(block, "id", str(i)) for i in range(1, len(variants) + 1))
+            out[RANGES] = ranges[:XML_OBJ_RE.search(ranges).start()] + body + "</objects>\n"
         else:
-            dropped.add(PROFILES)
+            dropped.add(RANGES)
+    if CUT_INFO in zin.namelist():
+        cut = zin.read(CUT_INFO).decode("utf-8")
+        block = next((m.group(0) for m in XML_OBJ_RE.finditer(cut) if m.group(1) == src_idx), None)
+        cut_id = block and re.search(r'<cut_id id="(\d+)"', block)
+        if cut_id and cut_id.group(1) != "0":
+            # The copies would all share the reference's cut id, linking them
+            # as parts of one cut, which isn't a sensible reference.
+            sys.exit("reference object is part of a cut; not a sensible reference")
+        dropped.add(CUT_INFO)
+    for path in (PROFILES, BRIM_EARS):
+        if path in zin.namelist():
+            lines = reindex_lines(zin.read(path).decode("utf-8"), src_idx, len(variants))
+            if lines is None:
+                dropped.add(path)
+            else:
+                out[path] = lines
 
     return out, dropped, fits, bool(text_parts)
 
