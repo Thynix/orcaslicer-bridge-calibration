@@ -101,11 +101,14 @@ def xform(m, point):
     return tuple(x * m[i] + y * m[3 + i] + z * m[6 + i] + t[i] for i in range(3))
 
 
-def footprint(submodels, model_obj, rotation):
-    """X/Y bounding box of a top-level object in its own frame, rotated as placed."""
+def footprint(submodels, model_obj, rotation, skip):
+    """X/Y bounding box of a top-level object in its own frame, rotated as placed,
+    leaving out the components with ids in SKIP."""
     xs, ys = [], []
     for comp in re.finditer(r'<component p:path="([^"]+)" objectid="(\d+)"[^>]*transform="([^"]*)"', model_obj):
         path, oid, comp_xform = comp.groups()
+        if oid in skip:
+            continue
         body = re.search(rf'<object id="{oid}".*?</object>', submodels[path], re.S).group(0)
         comp_m = list(map(float, comp_xform.split()))
         for v in re.finditer(r'<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"', body):
@@ -197,16 +200,19 @@ def build(zin, variants, plate_name):
     next_ordinal = max(int(u, 16) for u in
                        re.findall(r'<object [^>]*p:UUID="([0-9a-f]{8})', model)) + 1
     next_identify = max(int(v) for v in re.findall(r'key="identify_id" value="(\d+)"', cfg)) + 1
+    # Part ids in the config are the component objectids in 3dmodel.model.
+    text_ids = [re.search(r'<part id="(\d+)"', m.group(0)).group(1)
+                for m in PART_RE.finditer(cfg_objs[src_id]) if "<slic3rpe:text" in m.group(0)]
+    # Like Orca's bounding box, the footprint counts only model parts, not
+    # modifiers, negative volumes or support blockers/enforcers.
+    subtypes = dict(re.findall(r'<part id="(\d+)" subtype="([^"]*)"', cfg_objs[src_id]))
+    skip = {i for i, t in subtypes.items() if t != "normal_part"}
     src_xform = re.search(r'transform="([^"]*)"', items[src_id]).group(1).split()
     # The reference's sub-model files, read once for the footprint and text parts.
     src_submodels = {p: zin.read(p.lstrip("/")).decode("utf-8")
                      for p in dict.fromkeys(COMPONENT_PATH_RE.findall(model_objs[src_id]))}
     spots, fits = grid(len(variants), footprint(src_submodels, model_objs[src_id],
-                                                list(map(float, src_xform[:9]))), bed)
-
-    # Part ids in the config are the component objectids in 3dmodel.model.
-    text_ids = [re.search(r'<part id="(\d+)"', m.group(0)).group(1)
-                for m in PART_RE.finditer(cfg_objs[src_id]) if "<slic3rpe:text" in m.group(0)]
+                                                list(map(float, src_xform[:9])), skip), bed)
     submodels = {}  # new sub-model files: path -> contents
     # Orca names sub-model files "<name>_<n>.model"; keep <n> unique across the project.
     next_file = max((int(m.group(1)) for n in zin.namelist()
