@@ -64,22 +64,26 @@ def renumber_uuids(obj, ordinal):
 
 
 def fmt(value):
+    """Format a setting value like Orca: at most 4 decimals, no trailing zeros."""
     return f"{round(value, 4):g}"
 
 
 def relabel(obj_cfg, oid, label, settings):
     """Return a config <object> block with a new id, settings, and name, part names and text set to label."""
     obj_cfg = set_attr(obj_cfg, "id", oid)
+    # head is the <object> line and its object-level metadata; rest is the parts
+    # and closing tag.
     head_end = obj_cfg.index("    <part ") if "    <part " in obj_cfg else obj_cfg.index("  </object>")
     head, rest = obj_cfg[:head_end], obj_cfg[head_end:]
-    # Object-level metadata: name first, then keys sorted, as Orca writes them.
+    # Rebuild the object-level metadata so new keys land where Orca writes
+    # them: name first, then keys sorted.
     meta = {m.group(1): meta_value(m.group(0), m.group(1)) for m in OBJ_META_RE.finditer(head)}
     meta.pop("name", None)
     meta.update(settings)
-    lines = [(k, meta[k]) for k in sorted(meta)]
+    meta_items = [(k, meta[k]) for k in sorted(meta)]
     head = OBJ_META_RE.sub("", head) + "".join(
         f'    <metadata key="{k}" value="{html.escape(v, quote=True)}"/>\n'
-        for k, v in [("name", label)] + lines)
+        for k, v in [("name", label)] + meta_items)
     esc = html.escape(label, quote=True)
 
     def relabel_part(m):
@@ -118,10 +122,10 @@ def empty_text_mesh(submodels, model_obj, text_id, path):
     comp = re.search(rf'<component p:path="([^"]+)" objectid="{text_id}" p:UUID="([0-9a-f]{{8}})[^>]*>',
                      model_obj)
     src_path, uuid_prefix = comp.groups()
-    src = submodels[src_path]
-    uuid_suffix = re.search(rf'^  <object id="{text_id}" p:UUID="[0-9a-f]{{8}}([^"]*)"', src, re.M).group(1)
-    head = src[:src.index(" <resources>\n") + len(" <resources>\n")]
-    tail = src[src.index(" </resources>\n"):]
+    src_text = submodels[src_path]
+    uuid_suffix = re.search(rf'^  <object id="{text_id}" p:UUID="[0-9a-f]{{8}}([^"]*)"', src_text, re.M).group(1)
+    head = src_text[:src_text.index(" <resources>\n") + len(" <resources>\n")]
+    tail = src_text[src_text.index(" </resources>\n"):]
     # Sub-model object UUIDs share the prefix of the component referencing them.
     obj = (f'  <object id="{text_id}" p:UUID="{uuid_prefix}{uuid_suffix}" type="model">\n'
            "   <mesh>\n    <vertices>\n    </vertices>\n    <triangles>\n    </triangles>\n   </mesh>\n"
@@ -159,7 +163,7 @@ def grid(count, box, bed):
     return spots, min(gap_x, gap_y) >= GAP
 
 
-def build(zin, labels, plate_name):
+def build(zin, variants, plate_name):
     model = zin.read(MODEL).decode("utf-8")
     cfg = zin.read(CONFIG).decode("utf-8")
     area = json.loads(zin.read(PROJECT))["printable_area"]
@@ -170,14 +174,14 @@ def build(zin, labels, plate_name):
     plates = PLATE_RE.findall(cfg)
     if len(plates) != 1:
         sys.exit(f"expected 1 plate, found {len(plates)}")
-    plate = plates[0]
-    instances = INSTANCE_RE.findall(plate)
+    ref_plate = plates[0]
+    instances = INSTANCE_RE.findall(ref_plate)
     plate_ids = list(dict.fromkeys(meta_value(i, "object_id") for i in instances))
     cfg_objs = {m.group(1): m.group(0) for m in CFG_OBJ_RE.finditer(cfg)}
     if len(plate_ids) != 1:
         found = ", ".join(repr(meta_value(cfg_objs[o], "name")) for o in plate_ids) or "none"
         sys.exit(f"expected exactly 1 object on the plate, found {found}")
-    src = plate_ids[0]
+    src_id = plate_ids[0]
 
     model_objs = {m.group(1): m.group(0) for m in MODEL_OBJ_RE.finditer(model)}
     # First build item / assemble item of each object, in build order.
@@ -188,42 +192,44 @@ def build(zin, labels, plate_name):
         assemble.setdefault(m.group(1), m.group(0))
 
     next_id = max(map(int, model_objs)) + 1
+    # Also unique per file: the object UUID ordinal prefix (see renumber_uuids)
+    # and the config's identify_id.
     next_ordinal = max(int(u, 16) for u in
                        re.findall(r'<object [^>]*p:UUID="([0-9a-f]{8})', model)) + 1
     next_identify = max(int(v) for v in re.findall(r'key="identify_id" value="(\d+)"', cfg)) + 1
-    src_xform = re.search(r'transform="([^"]*)"', items[src]).group(1).split()
+    src_xform = re.search(r'transform="([^"]*)"', items[src_id]).group(1).split()
     # The reference's sub-model files, read once for the footprint and text parts.
     src_submodels = {p: zin.read(p.lstrip("/")).decode("utf-8")
-                     for p in dict.fromkeys(COMPONENT_PATH_RE.findall(model_objs[src]))}
-    spots, fits = grid(len(labels), footprint(src_submodels, model_objs[src],
-                                              list(map(float, src_xform[:9]))), bed)
+                     for p in dict.fromkeys(COMPONENT_PATH_RE.findall(model_objs[src_id]))}
+    spots, fits = grid(len(variants), footprint(src_submodels, model_objs[src_id],
+                                                list(map(float, src_xform[:9]))), bed)
 
     # Part ids in the config are the component objectids in 3dmodel.model.
     text_ids = [re.search(r'<part id="(\d+)"', m.group(0)).group(1)
-                for m in PART_RE.finditer(cfg_objs[src]) if "<slic3rpe:text" in m.group(0)]
+                for m in PART_RE.finditer(cfg_objs[src_id]) if "<slic3rpe:text" in m.group(0)]
     submodels = {}  # new sub-model files: path -> contents
     # Orca names sub-model files "<name>_<n>.model"; keep <n> unique across the project.
     next_file = max((int(m.group(1)) for n in zin.namelist()
                      if (m := re.search(r'_(\d+)\.model$', n))), default=0) + 1
     new_obj = new_item = new_cfg = new_inst = new_asm = ""
-    for n, (label, settings) in enumerate(labels):
+    for n, (label, settings) in enumerate(variants):
         oid = str(next_id + n)
         placed = src_xform[:]
-        placed[9:11] = (f"{v:.6g}" for v in spots[n])
-        obj = renumber_uuids(set_attr(model_objs[src], "id", oid), next_ordinal + n)
+        placed[9:11] = (f"{v:.6g}" for v in spots[n])  # mm; not a setting, so not fmt()
+        obj = renumber_uuids(set_attr(model_objs[src_id], "id", oid), next_ordinal + n)
         for text_id in text_ids:
             path = f"/3D/Objects/{label}_{next_file}.model"
             next_file += 1
             obj, submodels[path] = empty_text_mesh(src_submodels, obj, text_id, path)
         new_obj += obj
-        item = set_attr(items[src], "objectid", oid)
+        item = set_attr(items[src_id], "objectid", oid)
         item = re.sub(r'(p:UUID=")[0-9a-f]{8}', rf"\g<1>{int(oid):08x}", item, count=1)
         new_item += set_attr(item, "transform", " ".join(placed))
-        new_cfg += relabel(cfg_objs[src], oid, label, settings)
+        new_cfg += relabel(cfg_objs[src_id], oid, label, settings)
         inst = re.sub(r'(key="object_id" value=")\d+', rf"\g<1>{oid}", instances[0])
         new_inst += re.sub(r'(key="identify_id" value=")\d+', rf"\g<1>{next_identify + n}", inst)
-        if src in assemble:
-            new_asm += set_attr(assemble[src], "object_id", oid)
+        if src_id in assemble:
+            new_asm += set_attr(assemble[src_id], "object_id", oid)
 
     # 3dmodel.model: replace all objects and items with the copies.
     model = ITEM_RE.sub("", MODEL_OBJ_RE.sub("", model))
@@ -233,9 +239,9 @@ def build(zin, labels, plate_name):
     # model_settings.config: likewise for objects, plate instances and assemble items.
     first_obj = CFG_OBJ_RE.search(cfg).start()
     cfg = cfg[:first_obj] + new_cfg + CFG_OBJ_RE.sub("", cfg[first_obj:])
-    new_plate = rename_plate(INSTANCE_RE.sub("", plate), plate_name)
+    new_plate = rename_plate(INSTANCE_RE.sub("", ref_plate), plate_name)
     new_plate = new_plate.replace("  </plate>\n", new_inst + "  </plate>\n")
-    cfg = cfg.replace(plate, new_plate, 1)
+    cfg = cfg.replace(ref_plate, new_plate, 1)
     cfg = ASSEMBLE_RE.sub("", cfg)
     cfg = cfg.replace("  </assemble>\n", new_asm + "  </assemble>\n", 1)
 
@@ -260,9 +266,9 @@ def build(zin, labels, plate_name):
     # copy gets the reference's.
     if RANGES in zin.namelist():
         ranges = zin.read(RANGES).decode("utf-8")
-        src_idx = str(list(items).index(src) + 1)
+        src_idx = str(list(items).index(src_id) + 1)
         block = next((m.group(0) for m in RANGE_OBJ_RE.finditer(ranges) if m.group(1) == src_idx), None)
-        body = "".join(set_attr(block, "id", str(i)) for i in range(1, len(labels) + 1)) if block else ""
+        body = "".join(set_attr(block, "id", str(i)) for i in range(1, len(variants) + 1)) if block else ""
         first = RANGE_OBJ_RE.search(ranges)
         head = ranges[:first.start()] if first else ranges.replace("</objects>", "")
         out[RANGES] = head + body + "</objects>\n"
@@ -289,11 +295,11 @@ def main():
 
     flow = fmt(args.flow)
     step = (args.max_density - args.min_density) // max(args.count - 1, 1)
-    labels = []
+    variants = []
     for n in range(args.count):
         density = str(args.min_density + step * n)
         # tenths to save space
-        labels.append((f"{int(args.flow*10)%10}-{density}", {
+        variants.append((f"{int(args.flow*10)%10}-{density}", {
             "bridge_flow": flow,
             "internal_bridge_flow": flow,
             "bridge_density": f"{density}%",
@@ -301,7 +307,7 @@ def main():
 
     tmp = args.output + ".tmp"
     with zipfile.ZipFile(args.reference) as zin:
-        out, dropped, fits = build(zin, labels, f"Flow Factor {flow}")
+        out, dropped, fits = build(zin, variants, f"Flow Factor {flow}")
         names = set(zin.namelist())
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
             for info in zin.infolist():
