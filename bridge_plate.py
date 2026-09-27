@@ -298,6 +298,28 @@ def grid(count, box, bed, exclude=None):
 
 
 def build(zin, variants, plate_name, keep_text_mesh=False):
+    """Construct multiple copies of a reference object from an OrcaSlicer .3mf project.
+
+    Validates the reference project, computes placement on the print bed using grid
+    layout, duplicates the reference object for each variant, and rewrites all
+    metadata. Handles sub-model files, height ranges, cut information, layer height
+    profiles, and brim ear points.
+
+    Args:
+        zin: ZipFile of the reference project.
+        variants: List of (name, text_label, settings_dict) tuples; one copy per variant.
+        plate_name: Name for the output plate (replaces reference plate name).
+        keep_text_mesh: If False (default), replace reference text meshes with empty
+                        placeholders in each copy.
+
+    Returns:
+        Tuple of (out, dropped, fits, has_text, names):
+        - out (dict): New/changed zip entries by path ({path: content}).
+        - dropped (set): Zip entry names to remove from output.
+        - fits (bool): Whether all copies fit on the print bed at their grid positions.
+        - has_text (bool): Whether the reference object has text parts.
+        - names (set): Namelist of the reference .3mf (for tracking original entries).
+    """
     names = set(zin.namelist())
     model = zin.read(MODEL).decode("utf-8")
     if CONFIG not in names:
