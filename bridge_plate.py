@@ -8,8 +8,9 @@ The reference project must have one plate holding one object. OUT.3mf
 by COUNT copies of it laid out in a grid, with bridge_flow and
 internal_bridge_flow set to FLOW and bridge_density stepping from MIN_DENSITY
 to MAX_DENSITY (percent, inclusive). Each copy is named "FLOW-DENSITY", e.g.
-"1.3-104" for flow 1.3 and density 104%. Its text parts' text and names are
-set to "TENTHS-DENSITY", where TENTHS is the first decimal digit of FLOW, e.g.
+"1.3-104" for flow 1.3 and density 104% (FLOW is written as Orca writes the
+setting, so 1.0 is "1", not "1.0"). Its text parts' text and names are set to
+"TENTHS-DENSITY", where TENTHS is the first decimal digit of FLOW, e.g.
 "3-104"; other part names are kept. FLOW must be 1.0 to 1.9 in steps of 0.1 so
 TENTHS identifies it. The plate is named "Flow Factor FLOW".
 
@@ -78,7 +79,10 @@ def fmt(value):
 def flow_ratio(text):
     # The text shows only the tenths to fit the tile's text area, so the flow
     # must be one of 1.0-1.9 for them to identify it (within Orca's (0, 2]).
-    value = float(text)
+    try:
+        value = float(text)
+    except ValueError:
+        value = math.nan
     if not (math.isfinite(value) and 1 <= value <= 1.9 and abs(value * 10 - round(value * 10)) < 1e-9):
         raise argparse.ArgumentTypeError(f"{text!r} is not a flow ratio from 1.0 to 1.9 in steps of 0.1 "
                                          "(the label shows only the tenths digit)")
@@ -87,7 +91,10 @@ def flow_ratio(text):
 
 def density_percent(text):
     # Orca's bridge_density range.
-    value = int(text)
+    try:
+        value = int(text)
+    except ValueError:
+        value = -1
     if not 10 <= value <= 125:
         raise argparse.ArgumentTypeError(f"{text!r} is not a density from 10 to 125 (Orca's bridge_density range)")
     return value
@@ -364,14 +371,14 @@ def build(zin, variants, plate_name):
         else:
             dropped.add(PROFILES)
 
-    return out, dropped, fits
+    return out, dropped, fits, bool(text_parts)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("reference", help="reference project")
     ap.add_argument("output", help="output project, overwritten if it exists")
-    ap.add_argument("count", type=int, help="number of copies")
+    ap.add_argument("count", type=int, help="number of copies; COUNT - 1 must divide MAX_DENSITY - MIN_DENSITY")
     ap.add_argument("flow", type=flow_ratio, help="bridge flow ratio, 1.0 to 1.9 in steps of 0.1")
     ap.add_argument("min_density", type=density_percent, help="first bridge density, integer percent, 10 to 125")
     ap.add_argument("max_density", type=density_percent, help="last bridge density, integer percent, 10 to 125")
@@ -382,9 +389,10 @@ def main():
         ap.error("count must be at least 1")
     span = abs(args.max_density - args.min_density)
     if args.count > 1 and not span:
-        ap.error(f"count {args.count} needs different min and max densities, or the copies are identical")
+        ap.error(f"count {args.count} needs different min and max densities; "
+                 "otherwise the copies would be identical")
     if args.count == 1 and span:
-        ap.error("count 1 needs equal min and max densities, or max is ignored")
+        ap.error("count 1 needs equal min and max densities")
     if args.count > 1 and span % (args.count - 1):
         # count - 1 steps must divide the span, so valid counts are d + 1 for divisors d of span.
         valid = [d + 1 for d in range(1, span + 1) if span % d == 0]
@@ -392,11 +400,12 @@ def main():
                  f"{args.max_density}; valid counts: " + ", ".join(map(str, valid)))
 
     flow = fmt(args.flow)
+    tenths = round(args.flow * 10) % 10
     step = (args.max_density - args.min_density) // max(args.count - 1, 1)
     variants = []
     for n in range(args.count):
         density = str(args.min_density + step * n)
-        variants.append((f"{flow}-{density}", f"{flow[2:] or 0}-{density}", {
+        variants.append((f"{flow}-{density}", f"{tenths}-{density}", {
             "bridge_flow": flow,
             "internal_bridge_flow": flow,
             "bridge_density": f"{density}%",
@@ -404,7 +413,7 @@ def main():
 
     tmp = args.output + ".tmp"
     with zipfile.ZipFile(args.reference) as zin:
-        out, dropped, fits = build(zin, variants, f"Flow Factor {flow}")
+        out, dropped, fits, has_text = build(zin, variants, f"Flow Factor {flow}")
         names = set(zin.namelist())
         # New entries take the reference model's timestamp so output is reproducible.
         date_time = zin.getinfo(MODEL).date_time
@@ -427,11 +436,12 @@ def main():
                 os.remove(tmp)
             raise
 
-    print("note: text labels need OrcaSlicer branch text-rebuild/integration; "
-          "stock Orca drops them", file=sys.stderr)
+    if has_text:
+        print("note: text labels need OrcaSlicer branch text-rebuild/integration; "
+              "stock Orca drops them", file=sys.stderr)
 
     if not fits:
-        print("copies don't fit on the plate; arrange it in the slicer", file=sys.stderr)
+        print("warning: copies don't fit on the plate; arrange it in the slicer", file=sys.stderr)
 
 
 if __name__ == "__main__":
