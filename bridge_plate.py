@@ -89,36 +89,36 @@ def relabel(obj_cfg, oid, label, settings):
     return head + PART_RE.sub(relabel_part, rest)
 
 
-def xform(values, point):
-    """Apply a 3MF transform (12 floats, row-vector convention) to a point."""
-    m = list(map(float, values))
+def xform(m, point):
+    """Apply a 3MF transform (12 floats, row-vector convention) to a point;
+    given only the first 9, apply just the rotation."""
+    t = m[9:] or (0.0,) * 3
     x, y, z = point
-    return tuple(x * m[i] + y * m[3 + i] + z * m[6 + i] + m[9 + i] for i in range(3))
+    return tuple(x * m[i] + y * m[3 + i] + z * m[6 + i] + t[i] for i in range(3))
 
 
-def footprint(zin, model_obj, rotation):
+def footprint(submodels, model_obj, rotation):
     """X/Y bounding box of a top-level object in its own frame, rotated as placed."""
     xs, ys = [], []
-    meshes = {}
     for comp in re.finditer(r'<component p:path="([^"]+)" objectid="(\d+)"[^>]*transform="([^"]*)"', model_obj):
         path, oid, comp_xform = comp.groups()
-        if path not in meshes:
-            meshes[path] = zin.read(path.lstrip("/")).decode("utf-8")
-        body = re.search(rf'<object id="{oid}".*?</object>', meshes[path], re.S).group(0)
+        body = re.search(rf'<object id="{oid}".*?</object>', submodels[path], re.S).group(0)
+        comp_m = list(map(float, comp_xform.split()))
         for v in re.finditer(r'<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"', body):
-            x, y, _ = xform(rotation + ["0"] * 3, xform(comp_xform.split(), map(float, v.groups())))
+            x, y, _ = xform(rotation, xform(comp_m, map(float, v.groups())))
             xs.append(x)
             ys.append(y)
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def empty_text_mesh(zin, model_obj, text_id, path):
+def empty_text_mesh(submodels, model_obj, text_id, path):
     """Point MODEL_OBJ's text component at a new sub-model file PATH holding an
-    empty mesh; return the updated object and the new file's contents."""
+    empty mesh; return the updated object and the new file's contents.
+    SUBMODELS maps the reference's sub-model paths to their contents."""
     comp = re.search(rf'<component p:path="([^"]+)" objectid="{text_id}" p:UUID="([0-9a-f]{{8}})[^>]*>',
                      model_obj)
     src_path, uuid_prefix = comp.groups()
-    src = zin.read(src_path.lstrip("/")).decode("utf-8")
+    src = submodels[src_path]
     uuid_suffix = re.search(rf'^  <object id="{text_id}" p:UUID="[0-9a-f]{{8}}([^"]*)"', src, re.M).group(1)
     head = src[:src.index(" <resources>\n") + len(" <resources>\n")]
     tail = src[src.index(" </resources>\n"):]
@@ -128,6 +128,17 @@ def empty_text_mesh(zin, model_obj, text_id, path):
            "  </object>\n")
     new_comp = comp.group(0).replace(f'p:path="{src_path}"', f'p:path="{path}"', 1)
     return model_obj.replace(comp.group(0), new_comp, 1), head + obj + tail
+
+
+def rename_plate(plate, name):
+    """Set a config <plate> block's plater_name, adding it after plater_id if missing."""
+    name_line = f'    <metadata key="plater_name" value="{html.escape(name, quote=True)}"/>\n'
+    plate, renamed = re.subn(r'^    <metadata key="plater_name" value="[^"]*"/>\n',
+                             lambda m: name_line, plate, count=1, flags=re.M)
+    if not renamed:
+        plate = re.sub(r'(^    <metadata key="plater_id" [^\n]*\n)',
+                       lambda m: m.group(1) + name_line, plate, count=1, flags=re.M)
+    return plate
 
 
 def grid(count, box, bed):
@@ -181,13 +192,19 @@ def build(zin, labels, plate_name):
                        re.findall(r'<object [^>]*p:UUID="([0-9a-f]{8})', model)) + 1
     next_identify = max(int(v) for v in re.findall(r'key="identify_id" value="(\d+)"', cfg)) + 1
     src_xform = re.search(r'transform="([^"]*)"', items[src]).group(1).split()
-    spots, fits = grid(len(labels), footprint(zin, model_objs[src], src_xform[:9]), bed)
+    # The reference's sub-model files, read once for the footprint and text parts.
+    src_submodels = {p: zin.read(p.lstrip("/")).decode("utf-8")
+                     for p in dict.fromkeys(COMPONENT_PATH_RE.findall(model_objs[src]))}
+    spots, fits = grid(len(labels), footprint(src_submodels, model_objs[src],
+                                              list(map(float, src_xform[:9]))), bed)
 
     # Part ids in the config are the component objectids in 3dmodel.model.
     text_ids = [re.search(r'<part id="(\d+)"', m.group(0)).group(1)
                 for m in PART_RE.finditer(cfg_objs[src]) if "<slic3rpe:text" in m.group(0)]
     submodels = {}  # new sub-model files: path -> contents
-    next_file = max([int(n) for n in re.findall(r'_(\d+)\.model$', "\n".join(zin.namelist()), re.M)] + [0]) + 1
+    # Orca names sub-model files "<name>_<n>.model"; keep <n> unique across the project.
+    next_file = max((int(m.group(1)) for n in zin.namelist()
+                     if (m := re.search(r'_(\d+)\.model$', n))), default=0) + 1
     new_obj = new_item = new_cfg = new_inst = new_asm = ""
     for n, (label, settings) in enumerate(labels):
         oid = str(next_id + n)
@@ -197,7 +214,7 @@ def build(zin, labels, plate_name):
         for text_id in text_ids:
             path = f"/3D/Objects/{label}_{next_file}.model"
             next_file += 1
-            obj, submodels[path] = empty_text_mesh(zin, obj, text_id, path)
+            obj, submodels[path] = empty_text_mesh(src_submodels, obj, text_id, path)
         new_obj += obj
         item = set_attr(items[src], "objectid", oid)
         item = re.sub(r'(p:UUID=")[0-9a-f]{8}', rf"\g<1>{int(oid):08x}", item, count=1)
@@ -216,13 +233,7 @@ def build(zin, labels, plate_name):
     # model_settings.config: likewise for objects, plate instances and assemble items.
     first_obj = CFG_OBJ_RE.search(cfg).start()
     cfg = cfg[:first_obj] + new_cfg + CFG_OBJ_RE.sub("", cfg[first_obj:])
-    new_plate = INSTANCE_RE.sub("", plate)
-    name_line = f'    <metadata key="plater_name" value="{html.escape(plate_name, quote=True)}"/>\n'
-    new_plate, renamed = re.subn(r'^    <metadata key="plater_name" value="[^"]*"/>\n',
-                                 lambda m: name_line, new_plate, count=1, flags=re.M)
-    if not renamed:
-        new_plate = re.sub(r'(^    <metadata key="plater_id" [^\n]*\n)',
-                           lambda m: m.group(1) + name_line, new_plate, count=1, flags=re.M)
+    new_plate = rename_plate(INSTANCE_RE.sub("", plate), plate_name)
     new_plate = new_plate.replace("  </plate>\n", new_inst + "  </plate>\n")
     cfg = cfg.replace(plate, new_plate, 1)
     cfg = ASSEMBLE_RE.sub("", cfg)
