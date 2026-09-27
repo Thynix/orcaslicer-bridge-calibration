@@ -127,7 +127,7 @@ def relabel(obj_cfg, oid, name, text, settings):
         part = m.group(0)
         if "<slic3rpe:text" not in part:
             return part
-        part = re.sub(r'(<metadata key="name" value=")[^"]*', rf"\g<1>{esc}", part, count=1)
+        part = re.sub(r'(<metadata key="name" value=")[^"]*', lambda m: m.group(1) + esc, part, count=1)
         # The fix transform is folded into the component transform by empty_text_mesh.
         part = SHAPE_RE.sub(lambda s: re.sub(r' transform="[^"]*"', "", s.group(0)), part)
         return TEXT_RE.sub(lambda t: f'{t.group(1)}{esc}"', part)
@@ -172,6 +172,8 @@ def footprint(submodels, model_obj, rotation, skip):
             x, y, _ = xform(rotation, xform(comp_m, map(float, v.groups())))
             xs.append(x)
             ys.append(y)
+    if not xs:
+        sys.exit("reference object has no model-part components")
     return min(xs), min(ys), max(xs), max(ys)
 
 
@@ -189,6 +191,8 @@ def empty_text_mesh(submodels, model_obj, text_id, fix, path):
     src_path, uuid_prefix = comp.groups()
     src_text = submodels[src_path]
     src_obj = re.search(rf'^  <object id="{text_id}" p:UUID="[0-9a-f]{{8}}([^"]*)".*?</object>', src_text, re.M | re.S)
+    if src_obj is None:
+        sys.exit(f"text part {text_id}'s sub-model object doesn't match the expected p:UUID format")
     uuid_suffix = src_obj.group(1)
     head = src_text[:src_text.index(" <resources>\n") + len(" <resources>\n")]
     tail = src_text[src_text.index(" </resources>\n"):]
@@ -262,6 +266,8 @@ def grid(count, box, bed, exclude=None):
 
 def build(zin, variants, plate_name):
     model = zin.read(MODEL).decode("utf-8")
+    if CONFIG not in zin.namelist():
+        sys.exit("not an Orca/Bambu project: no Metadata/model_settings.config")
     cfg = zin.read(CONFIG).decode("utf-8")
     proj = json.loads(zin.read(PROJECT))
     pts = [tuple(map(float, p.split("x"))) for p in proj["printable_area"]]
@@ -306,6 +312,8 @@ def build(zin, variants, plate_name):
     next_identify = max(int(v) for v in re.findall(r'key="identify_id" value="(\d+)"', cfg)) + 1
     # Part ids in the config are the component objectids in 3dmodel.model;
     # text part id -> the shape's fix transform, if any.
+    if "<text_info" in cfg_objs[src_id]:
+        sys.exit("re-save the reference in OrcaSlicer to convert its text")
     text_parts = {}
     for m in PART_RE.finditer(cfg_objs[src_id]):
         if "<slic3rpe:text" in m.group(0):
