@@ -98,6 +98,11 @@ def fmt(value):
     return f"{round(value, 4):g}"
 
 
+def read_text(zin, path):
+    """Read a text entry from a ZIP archive."""
+    return zin.read(path).decode("utf-8")
+
+
 def flow_ratio(text):
     # The text shows only the tenths to fit the tile's text area, so the flow
     # must be one of 1.0-1.9 for them to identify it (within Orca's (0, 2]).
@@ -297,10 +302,10 @@ def grid(count, box, bed, exclude=None):
 
 def build(zin, variants, plate_name, keep_text_mesh=False):
     names = set(zin.namelist())
-    model = zin.read(MODEL).decode("utf-8")
+    model = read_text(zin, MODEL)
     if CONFIG not in names:
         sys.exit("not an Orca/Bambu project: no Metadata/model_settings.config")
-    cfg = zin.read(CONFIG).decode("utf-8")
+    cfg = read_text(zin, CONFIG)
     proj = json.loads(zin.read(PROJECT))
     bed = bbox([tuple(map(float, p.split("x"))) for p in proj["printable_area"]])
     # Same "XxY" format as printable_area; missing, empty or a degenerate
@@ -372,7 +377,7 @@ def build(zin, variants, plate_name, keep_text_mesh=False):
     src_xform = attr(src_item, "transform").split()
     # The reference's sub-model files, read once for the footprint and text parts.
     # p:path is XML-escaped, but the zip entry name is raw.
-    src_submodels = {p: zin.read(html.unescape(p).lstrip("/")).decode("utf-8")
+    src_submodels = {p: read_text(zin, html.unescape(p).lstrip("/"))
                      for p in dict.fromkeys(COMPONENT_PATH_RE.findall(model_objs[src_id]))}
     spots, fits = grid(len(variants), footprint(src_submodels, model_objs[src_id],
                                                 [float(v) for v in src_xform[:9]], skip), bed, exclude)
@@ -439,7 +444,7 @@ def build(zin, variants, plate_name, keep_text_mesh=False):
 
     out = {MODEL: model, CONFIG: cfg}
     if MODEL_RELS in names:
-        rels = zin.read(MODEL_RELS).decode("utf-8")
+        rels = read_text(zin, MODEL_RELS)
         rels = REL_RE.sub(lambda m: "" if m.group(1).startswith("/3D/Objects/")
                           and html.unescape(m.group(1)) not in used else m.group(0), rels)
         next_rel = max(map(int, re.findall(r'Id="rel-(\d+)"', rels)), default=0) + 1
@@ -456,7 +461,7 @@ def build(zin, variants, plate_name, keep_text_mesh=False):
     # copy gets the reference's, or the file is dropped if it has none.
     src_idx = str(list(items).index(src_id) + 1)
     if RANGES in names:
-        ranges = zin.read(RANGES).decode("utf-8")
+        ranges = read_text(zin, RANGES)
         block = find_xml_obj(ranges, src_idx)
         if block:
             body = "".join(set_attr(block, "id", str(i)) for i in range(1, len(variants) + 1))
@@ -464,7 +469,7 @@ def build(zin, variants, plate_name, keep_text_mesh=False):
         else:
             dropped.add(RANGES)
     if CUT_INFO in names:
-        cut = zin.read(CUT_INFO).decode("utf-8")
+        cut = read_text(zin, CUT_INFO)
         block = find_xml_obj(cut, src_idx)
         cut_id = block and re.search(r'<cut_id id="(\d+)"', block)
         if cut_id and cut_id.group(1) != "0":
@@ -474,7 +479,7 @@ def build(zin, variants, plate_name, keep_text_mesh=False):
         dropped.add(CUT_INFO)
     for path in (PROFILES, BRIM_EARS):
         if path in names:
-            lines = reindex_lines(zin.read(path).decode("utf-8"), src_idx, len(variants))
+            lines = reindex_lines(read_text(zin, path), src_idx, len(variants))
             if lines is None:
                 dropped.add(path)
             else:
