@@ -12,8 +12,9 @@ set to "TENTHS-DENSITY", where TENTHS is the first decimal digit of FLOW, e.g.
 "3-104" for flow 1.3 and density 104%. The plate is named "Flow Factor FLOW".
 
 Each copy's text part gets its own sub-model file holding an empty mesh, which
-a patched OrcaSlicer (branch rebuild-empty-text-on-load) rebuilds from the text
-settings on load. Stock Orca drops such text parts.
+a patched OrcaSlicer (branch text-rebuild/integration, 14b41380ed) rebuilds from
+the text settings on load. Stock Orca silently drops such text parts, leaving
+the copies unlabelled.
 """
 import argparse
 import html
@@ -302,6 +303,9 @@ def main():
                 if name not in names:
                     zout.writestr(name, out[name].encode("utf-8"))
     shutil.move(tmp, args.output)
+
+    print("note: text labels need OrcaSlicer branch text-rebuild/integration; "
+          "stock Orca drops them", file=sys.stderr)
 
     if not fits:
         print("copies don't fit on the plate; arrange it in the slicer", file=sys.stderr)
