@@ -307,7 +307,8 @@ def main():
     labels = []
     for n in range(args.count):
         density = str(args.min_density + step * n)
-        labels.append((f"{flow}-{density}", {
+        # tenths to save space
+        labels.append((f"{int(args.flow*10)%10}-{density}", {
             "bridge_flow": flow,
             "internal_bridge_flow": flow,
             "bridge_density": f"{density}%",
