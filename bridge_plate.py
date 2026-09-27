@@ -7,8 +7,9 @@ The project must have a plate named "reference" holding exactly one object, and
 at most one other plate. That other plate is emptied and reused, or a new plate
 is added if there is none. COUNT copies of the reference object are placed on
 it at the X/Y positions of the plate's former objects, in their plate order, or
-laid out in a grid if there were fewer than COUNT of them, with bridge_flow and internal_bridge_flow set to FLOW and
-bridge_density stepping from MIN_DENSITY to MAX_DENSITY (percent, inclusive).
+laid out in a grid if there were fewer than COUNT of them, with bridge_flow and
+internal_bridge_flow set to FLOW and bridge_density stepping from MIN_DENSITY
+to MAX_DENSITY (percent, inclusive).
 Each copy's name, part names and text are set to "FLOW-DENSITY", e.g.
 "1.3-104", and the plate is named "Flow Factor FLOW". The reference plate is
 untouched. The file is modified in place (a .bak copy is kept) unless -o is
@@ -169,8 +170,7 @@ def build(zin, labels, plate_name):
         blank = PLATE_META_DROP_RE.sub("", INSTANCE_RE.sub("", start_plate))
         blank = re.sub(r'(key="plater_id" value=")\d+', rf"\g<1>{new_id}", blank, count=1)
     instances = INSTANCE_RE.findall(plate)
-    removed = list(dict.fromkeys(meta_value(i, "object_id") for i in instances))
-    gone = set(removed)
+    gone = {meta_value(i, "object_id") for i in instances}
 
     model_objs = {m.group(1): m.group(0) for m in MODEL_OBJ_RE.finditer(model)}
     items = {m.group(1): m.group(0) for m in ITEM_RE.finditer(model)}
@@ -282,7 +282,7 @@ def build(zin, labels, plate_name):
         head = ranges[:RANGE_OBJ_RE.search(ranges).start()] if by_idx else ranges.replace("</objects>", "")
         out[RANGES] = head + body + "</objects>\n"
 
-    return out, dropped, removed, fits, bool(plate), len(old_spots) >= len(labels)
+    return out, dropped, fits
 
 
 def main():
@@ -314,7 +314,7 @@ def main():
         }))
 
     with zipfile.ZipFile(args.file) as zin:
-        out, dropped, removed, fits, reused, kept = build(zin, labels, f"Flow Factor {flow}")
+        out, dropped, fits = build(zin, labels, f"Flow Factor {flow}")
         if args.output is None:
             shutil.copy2(args.file, args.file + ".bak")
         dest = args.output or args.file
