@@ -53,6 +53,7 @@ OBJ_META_RE = re.compile(r'^    <metadata key="([^"]+)" value="[^"]*"/>\n', re.M
 PART_RE = re.compile(r"^    <part .*?^    </part>\n", re.M | re.S)
 TEXT_RE = re.compile(r'(<slic3rpe:text\b[^>]*\btext=")[^"]*"')
 SHAPE_RE = re.compile(r'<slic3rpe:shape\b[^>]*>')
+VERTEX_RE = re.compile(r'<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"')
 
 
 def meta_value(block, key):
@@ -60,8 +61,22 @@ def meta_value(block, key):
     return html.unescape(m.group(1)) if m else None
 
 
+def set_meta(block, key, value):
+    """Set metadata KEY's value in BLOCK to VALUE, the write-side partner of meta_value."""
+    return re.sub(rf'(<metadata key="{key}" value=")[^"]*', lambda m: m.group(1) + value, block, count=1)
+
+
 def set_attr(text, attr, value):
     return re.sub(rf'\b{attr}="[^"]*"', f'{attr}="{value}"', text, count=1)
+
+
+def attr(text, name):
+    """Read attribute NAME from TEXT, the read-side partner of set_attr."""
+    return re.search(rf'\b{name}="([^"]*)"', text).group(1)
+
+
+def floats(text):
+    return list(map(float, text.split()))
 
 
 def renumber_uuids(obj, ordinal):
@@ -109,15 +124,15 @@ def relabel(obj_cfg, oid, name, text, settings):
     meta.update(settings)
     meta_items = [(k, meta[k]) for k in sorted(meta)]
     head = OBJ_META_RE.sub("", head) + "".join(
-        f'    <metadata key="{k}" value="{html.escape(v, quote=True)}"/>\n'
+        f'    <metadata key="{k}" value="{html.escape(v)}"/>\n'
         for k, v in [("name", name)] + meta_items)
-    esc = html.escape(text, quote=True)
+    esc = html.escape(text)
 
     def relabel_part(m):
         part = m.group(0)
         if "<slic3rpe:text" not in part:
             return part
-        part = re.sub(r'(<metadata key="name" value=")[^"]*', rf"\g<1>{esc}", part, count=1)
+        part = set_meta(part, "name", esc)
         # The fix transform is folded into the component transform by empty_text_mesh.
         part = SHAPE_RE.sub(lambda s: re.sub(r' transform="[^"]*"', "", s.group(0)), part)
         return TEXT_RE.sub(lambda t: f'{t.group(1)}{esc}"', part)
@@ -152,13 +167,14 @@ def footprint(submodels, model_obj, rotation, skip):
     """X/Y bounding box of a top-level object in its own frame, rotated as placed,
     leaving out the components with ids in SKIP."""
     xs, ys = [], []
-    for comp in re.finditer(r'<component p:path="([^"]+)" objectid="(\d+)"[^>]*transform="([^"]*)"', model_obj):
-        path, oid, comp_xform = comp.groups()
+    for comp in re.finditer(r'<component[^>]*/>', model_obj):
+        comp = comp.group(0)
+        oid = attr(comp, "objectid")
         if oid in skip:
             continue
-        body = re.search(rf'<object id="{oid}".*?</object>', submodels[path], re.S).group(0)
-        comp_m = list(map(float, comp_xform.split()))
-        for v in re.finditer(r'<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"', body):
+        body = re.search(rf'<object id="{oid}".*?</object>', submodels[attr(comp, "p:path")], re.S).group(0)
+        comp_m = floats(attr(comp, "transform"))
+        for v in VERTEX_RE.finditer(body):
             x, y, _ = xform(rotation, xform(comp_m, map(float, v.groups())))
             xs.append(x)
             ys.append(y)
@@ -190,21 +206,20 @@ def empty_text_mesh(submodels, model_obj, text_id, fix, path):
     # Orca centres a loaded text mesh and undoes that with the fix transform; a
     # rebuilt one isn't, so the text frame is comp * T(c) * fix^-1, with c the
     # centre of the mesh's bounding box. A mesh already stripped keeps its frame.
-    verts = [tuple(map(float, v)) for v in
-             re.findall(r'<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"', src_obj.group(0))]
+    verts = [tuple(map(float, v)) for v in VERTEX_RE.findall(src_obj.group(0))]
     if verts:
         c = [(min(v[i] for v in verts) + max(v[i] for v in verts)) / 2 for i in range(3)]
         frame = [1, 0, 0, 0, 1, 0, 0, 0, 1] + c
         if fix:
             frame = compose(frame, invert(fix))
-        comp_xform = list(map(float, re.search(r'transform="([^"]*)"', comp.group(0)).group(1).split()))
+        comp_xform = floats(attr(comp.group(0), "transform"))
         new_comp = set_attr(new_comp, "transform", " ".join(f"{v:.9g}" for v in compose(comp_xform, frame)))
     return model_obj.replace(comp.group(0), new_comp, 1), head + obj + tail
 
 
 def rename_plate(plate, name):
     """Set a config <plate> block's plater_name, adding it after plater_id if missing."""
-    name_line = f'    <metadata key="plater_name" value="{html.escape(name, quote=True)}"/>\n'
+    name_line = f'    <metadata key="plater_name" value="{html.escape(name)}"/>\n'
     plate, renamed = re.subn(r'^    <metadata key="plater_name" value="[^"]*"/>\n',
                              lambda m: name_line, plate, count=1, flags=re.M)
     if not renamed:
@@ -232,6 +247,7 @@ def grid(count, box, bed):
 
 
 def build(zin, variants, plate_name):
+    names = set(zin.namelist())
     model = zin.read(MODEL).decode("utf-8")
     cfg = zin.read(CONFIG).decode("utf-8")
     area = json.loads(zin.read(PROJECT))["printable_area"]
@@ -271,28 +287,26 @@ def build(zin, variants, plate_name):
     for m in PART_RE.finditer(cfg_objs[src_id]):
         if "<slic3rpe:text" in m.group(0):
             shape = SHAPE_RE.search(m.group(0))
-            fix = shape and re.search(r'\btransform="([^"]*)"', shape.group(0))
-            text_parts[re.search(r'<part id="(\d+)"', m.group(0)).group(1)] = (
-                list(map(float, fix.group(1).split())) if fix else None)
+            fix = shape and attr(shape.group(0), "transform")
+            text_parts[attr(m.group(0), "id")] = floats(fix) if fix else None
     # Like Orca's bounding box, the footprint counts only model parts, not
     # modifiers, negative volumes or support blockers/enforcers.
     subtypes = dict(re.findall(r'<part id="(\d+)" subtype="([^"]*)"', cfg_objs[src_id]))
     skip = {i for i, t in subtypes.items() if t != "normal_part"}
-    src_xform = re.search(r'transform="([^"]*)"', items[src_id]).group(1).split()
+    src_xform = floats(attr(items[src_id], "transform"))
     # The reference's sub-model files, read once for the footprint and text parts.
     src_submodels = {p: zin.read(p.lstrip("/")).decode("utf-8")
                      for p in dict.fromkeys(COMPONENT_PATH_RE.findall(model_objs[src_id]))}
-    spots, fits = grid(len(variants), footprint(src_submodels, model_objs[src_id],
-                                                list(map(float, src_xform[:9])), skip), bed)
+    spots, fits = grid(len(variants), footprint(src_submodels, model_objs[src_id], src_xform[:9], skip), bed)
     submodels = {}  # new sub-model files: path -> contents
     # Orca names sub-model files "<name>_<n>.model"; keep <n> unique across the project.
-    next_file = max((int(m.group(1)) for n in zin.namelist()
+    next_file = max((int(m.group(1)) for n in names
                      if (m := re.search(r'_(\d+)\.model$', n))), default=0) + 1
     new_obj = new_item = new_cfg = new_inst = new_asm = ""
     for n, (name, text, settings) in enumerate(variants):
         oid = str(next_id + n)
         placed = src_xform[:]
-        placed[9:11] = (f"{v:.6g}" for v in spots[n])  # mm; not a setting, so not fmt()
+        placed[9:11] = spots[n]
         obj = renumber_uuids(set_attr(model_objs[src_id], "id", oid), next_ordinal + n)
         for text_id, fix in text_parts.items():
             path = f"/3D/Objects/{name}_{next_file}.model"
@@ -301,10 +315,12 @@ def build(zin, variants, plate_name):
         new_obj += obj
         item = set_attr(items[src_id], "objectid", oid)
         item = re.sub(r'(p:UUID=")[0-9a-f]{8}', rf"\g<1>{int(oid):08x}", item, count=1)
-        new_item += set_attr(item, "transform", " ".join(placed))
+        # The two placed coordinates are mm, not a setting, so :.6g not fmt().
+        transform = " ".join(f"{v:.6g}" if i in (9, 10) else f"{v:.9g}" for i, v in enumerate(placed))
+        new_item += set_attr(item, "transform", transform)
         new_cfg += relabel(cfg_objs[src_id], oid, name, text, settings)
-        inst = re.sub(r'(key="object_id" value=")\d+', rf"\g<1>{oid}", instances[0])
-        new_inst += re.sub(r'(key="identify_id" value=")\d+', rf"\g<1>{next_identify + n}", inst)
+        inst = set_meta(instances[0], "object_id", oid)
+        new_inst += set_meta(inst, "identify_id", str(next_identify + n))
         if src_id in assemble:
             new_asm += set_attr(assemble[src_id], "object_id", oid)
 
@@ -317,18 +333,18 @@ def build(zin, variants, plate_name):
     first_obj = CFG_OBJ_RE.search(cfg).start()
     cfg = cfg[:first_obj] + new_cfg + CFG_OBJ_RE.sub("", cfg[first_obj:])
     new_plate = rename_plate(INSTANCE_RE.sub("", ref_plate), plate_name)
-    new_plate = new_plate.replace("  </plate>\n", new_inst + "  </plate>\n")
+    new_plate = new_plate.replace("  </plate>\n", new_inst + "  </plate>\n", 1)
     cfg = cfg.replace(ref_plate, new_plate, 1)
     cfg = ASSEMBLE_RE.sub("", cfg)
     cfg = cfg.replace("  </assemble>\n", new_asm + "  </assemble>\n", 1)
 
     # Sub-model files no longer referenced by any component.
     used = set(COMPONENT_PATH_RE.findall(model))
-    all_paths = {"/" + n for n in zin.namelist() if n.startswith("3D/Objects/")}
+    all_paths = {"/" + n for n in names if n.startswith("3D/Objects/")}
     dropped = {p.lstrip("/") for p in all_paths - used}
 
     out = {MODEL: model, CONFIG: cfg}
-    if MODEL_RELS in zin.namelist():
+    if MODEL_RELS in names:
         rels = zin.read(MODEL_RELS).decode("utf-8")
         rels = REL_RE.sub(lambda m: "" if m.group(1).startswith("/3D/Objects/") and m.group(1) not in used
                           else m.group(0), rels)
@@ -343,14 +359,14 @@ def build(zin, variants, plate_name):
     # Height ranges and variable layer height profiles are keyed by 1-based
     # object index in build order; every copy gets the reference's.
     src_idx = str(list(items).index(src_id) + 1)
-    if RANGES in zin.namelist():
+    if RANGES in names:
         ranges = zin.read(RANGES).decode("utf-8")
         block = next((m.group(0) for m in RANGE_OBJ_RE.finditer(ranges) if m.group(1) == src_idx), None)
         body = "".join(set_attr(block, "id", str(i)) for i in range(1, len(variants) + 1)) if block else ""
         first = RANGE_OBJ_RE.search(ranges)
         head = ranges[:first.start()] if first else ranges.replace("</objects>", "")
         out[RANGES] = head + body + "</objects>\n"
-    if PROFILES in zin.namelist():
+    if PROFILES in names:
         # One "object_id=N|z0;h0;z1;h1;..." line per object.
         profile = re.search(rf"^object_id={src_idx}\|(.*)$", zin.read(PROFILES).decode("utf-8"), re.M)
         if profile:
@@ -358,7 +374,7 @@ def build(zin, variants, plate_name):
         else:
             dropped.add(PROFILES)
 
-    return out, dropped, fits
+    return out, dropped, fits, names
 
 
 def main():
@@ -396,8 +412,7 @@ def main():
 
     tmp = args.output + ".tmp"
     with zipfile.ZipFile(args.reference) as zin:
-        out, dropped, fits = build(zin, variants, f"Flow Factor {flow}")
-        names = set(zin.namelist())
+        out, dropped, fits, names = build(zin, variants, f"Flow Factor {flow}")
         # New entries take the reference model's timestamp so output is reproducible.
         date_time = zin.getinfo(MODEL).date_time
         zout = zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED)
