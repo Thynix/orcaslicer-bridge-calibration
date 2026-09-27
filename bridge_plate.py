@@ -317,6 +317,8 @@ def build(zin, variants, plate_name, keep_text_mesh=False):
         sys.exit(f"expected 1 plate, found {len(plates)}")
     ref_plate = plates[0]
     instances = INSTANCE_RE.findall(ref_plate)
+    if len(instances) != 1:
+        sys.exit(f"expected exactly 1 instance of the plate's object, found {len(instances)}")
     plate_ids = list(dict.fromkeys(meta_value(i, "object_id") for i in instances))
     cfg_objs = {m.group(1): m.group(0) for m in CFG_OBJ_RE.finditer(cfg)}
     if len(plate_ids) != 1:
