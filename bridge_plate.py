@@ -384,6 +384,9 @@ def build(zin, variants, plate_name, keep_text_mesh=False):
     # Orca names sub-model files "<name>_<n>.model"; keep <n> unique across the project.
     next_file = max((int(m.group(1)) for n in names
                      if (m := re.search(r'_(\d+)\.model$', n))), default=0) + 1
+    # Guard against UUID ordinal overflow: component ordinal uses 4 hex digits (max 0xFFFF)
+    if next_ordinal + len(variants) - 1 > 0xFFFF:
+        sys.exit("too many copies: component UUID ordinal would overflow its 4-hex-digit field")
     new_obj = new_item = new_cfg = new_inst = new_asm = ""
     for n, (name, text, settings) in enumerate(variants):
         oid = str(next_id + n)
