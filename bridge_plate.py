@@ -86,10 +86,15 @@ def floats(text):
     return list(map(float, text.split()))
 
 
+def set_uuid8(text, anchor, value):
+    """Set the 8-hex-digit p:UUID prefix on the first tag matching ANCHOR."""
+    return re.sub(rf'({anchor}[^>]*p:UUID=")[0-9a-f]{{8}}', rf"\g<1>{value:08x}", text, count=1)
+
+
 def renumber_uuids(obj, ordinal):
     # Bambu UUIDs start with the object's ordinal (8 hex digits), or for a
     # component, the ordinal (4) then the component index (4); keep that scheme.
-    obj = re.sub(r'(<object [^>]*p:UUID=")[0-9a-f]{8}', rf"\g<1>{ordinal:08x}", obj, count=1)
+    obj = set_uuid8(obj, "<object ", ordinal)
     return re.sub(r'(<component [^>]*p:UUID=")[0-9a-f]{4}', rf"\g<1>{ordinal:04x}", obj)
 
 
@@ -422,7 +427,9 @@ def build(zin, variants, plate_name, keep_text_mesh=False):
                 obj, submodels[path] = empty_text_mesh(src_submodels, obj, text_id, fix, path)
         new_obj += obj
         item = set_attr(src_item, "objectid", oid)
-        item = re.sub(r'(p:UUID=")[0-9a-f]{8}', rf"\g<1>{int(oid):08x}", item, count=1)
+        # Item's UUID prefix uses the object's own new id, not the ordinal counter
+        # used for <object>/<component> UUIDs; Orca's reference files use this scheme.
+        item = set_uuid8(item, "", int(oid))
         new_item += set_attr(item, "transform", " ".join(placed))
         new_cfg += relabel(cfg_objs[src_id], oid, name, text, settings, keep_text_mesh)
         # Each copy is a single instance, so it's instance 0.
