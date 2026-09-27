@@ -213,9 +213,10 @@ def rename_plate(plate, name):
     return plate
 
 
-def grid(count, box, bed):
+def grid(count, box, bed, exclude=None):
     """X/Y translations spreading COUNT objects with footprint BOX evenly over
-    the bed, and whether they keep GAP apart and inside it."""
+    the bed, and whether they keep at least GAP from the bed edges and each
+    other and clear of EXCLUDE (a bed_exclude_area bounding box, or None)."""
     bx0, by0, bx1, by1 = box
     w, h = bx1 - bx0, by1 - by0
     x0, y0, x1, y1 = bed
@@ -224,20 +225,28 @@ def grid(count, box, bed):
     cols = math.ceil(count / rows)
     gap_x = (x1 - x0 - cols * w) / (cols + 1)
     gap_y = (y1 - y0 - rows * h) / (rows + 1)
+    fits = min(gap_x, gap_y) >= GAP
     spots = []
     for n in range(count):
         row, col = divmod(n, cols)
-        spots.append((x0 + gap_x + col * (w + gap_x) - bx0, y1 - (row + 1) * (h + gap_y) - by0))
-    return spots, min(gap_x, gap_y) >= GAP
+        cx0, cy0 = x0 + gap_x + col * (w + gap_x), y1 - (row + 1) * (h + gap_y)
+        if exclude and cx0 < exclude[2] and cx0 + w > exclude[0] and cy0 < exclude[3] and cy0 + h > exclude[1]:
+            fits = False
+        spots.append((cx0 - bx0, cy0 - by0))
+    return spots, fits
 
 
 def build(zin, variants, plate_name):
     model = zin.read(MODEL).decode("utf-8")
     cfg = zin.read(CONFIG).decode("utf-8")
-    area = json.loads(zin.read(PROJECT))["printable_area"]
-    pts = [tuple(map(float, p.split("x"))) for p in area]
+    proj = json.loads(zin.read(PROJECT))
+    pts = [tuple(map(float, p.split("x"))) for p in proj["printable_area"]]
     bed = (min(p[0] for p in pts), min(p[1] for p in pts),
            max(p[0] for p in pts), max(p[1] for p in pts))
+    # Same "XxY" format as printable_area; ["0x0"] (the default) excludes nothing.
+    excl_pts = [tuple(map(float, p.split("x"))) for p in proj.get("bed_exclude_area", ["0x0"])]
+    exclude = (min(p[0] for p in excl_pts), min(p[1] for p in excl_pts),
+               max(p[0] for p in excl_pts), max(p[1] for p in excl_pts))
 
     plates = PLATE_RE.findall(cfg)
     if len(plates) != 1:
@@ -283,7 +292,7 @@ def build(zin, variants, plate_name):
     src_submodels = {p: zin.read(p.lstrip("/")).decode("utf-8")
                      for p in dict.fromkeys(COMPONENT_PATH_RE.findall(model_objs[src_id]))}
     spots, fits = grid(len(variants), footprint(src_submodels, model_objs[src_id],
-                                                list(map(float, src_xform[:9])), skip), bed)
+                                                list(map(float, src_xform[:9])), skip), bed, exclude)
     submodels = {}  # new sub-model files: path -> contents
     # Orca names sub-model files "<name>_<n>.model"; keep <n> unique across the project.
     next_file = max((int(m.group(1)) for n in zin.namelist()
@@ -421,7 +430,7 @@ def main():
     print("note: text labels need OrcaSlicer branch text-rebuild/integration; "
           "stock Orca drops them", file=sys.stderr)
 
-    if not fits:
+    if not fits:  # also true if a copy overlaps bed_exclude_area
         print("copies don't fit on the plate; arrange it in the slicer", file=sys.stderr)
 
 
