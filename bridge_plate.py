@@ -327,6 +327,17 @@ def build(zin, variants, plate_name):
     all_paths = {"/" + n for n in zin.namelist() if n.startswith("3D/Objects/")}
     dropped = {p.lstrip("/") for p in all_paths - used}
 
+    # A kept reference file's original text mesh is itself no longer
+    # referenced (each copy points at its own empty-mesh file instead);
+    # prune that dead object so Orca doesn't parse and discard it every time.
+    referenced = set(re.findall(r'p:path="([^"]+)" objectid="(\d+)"', model))
+    pruned = {}
+    for path in used & src_submodels.keys():
+        body = MODEL_OBJ_RE.sub(lambda m: m.group(0) if (path, m.group(1)) in referenced else "",
+                                src_submodels[path])
+        if body != src_submodels[path]:
+            pruned[path.lstrip("/")] = body
+
     out = {MODEL: model, CONFIG: cfg}
     if MODEL_RELS in zin.namelist():
         rels = zin.read(MODEL_RELS).decode("utf-8")
@@ -339,6 +350,7 @@ def build(zin, variants, plate_name):
             for i, path in enumerate(submodels))
         out[MODEL_RELS] = rels.replace("</Relationships>", new_rels + "</Relationships>", 1)
     out.update({path.lstrip("/"): body for path, body in submodels.items()})
+    out.update(pruned)
 
     # Height ranges and variable layer height profiles are keyed by 1-based
     # object index in build order; every copy gets the reference's.
