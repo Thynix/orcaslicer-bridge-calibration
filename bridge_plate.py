@@ -19,6 +19,7 @@ import argparse
 import html
 import json
 import math
+import os
 import re
 import shutil
 import sys
@@ -292,16 +293,25 @@ def main():
     with zipfile.ZipFile(args.reference) as zin:
         out, dropped, fits = build(zin, labels, f"Flow Factor {flow}")
         names = set(zin.namelist())
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
-            for info in zin.infolist():
-                if info.filename in dropped:
-                    continue
-                data = out[info.filename].encode("utf-8") if info.filename in out else zin.read(info)
-                zout.writestr(info, data, compress_type=info.compress_type)
-            for name in out:
-                if name not in names:
-                    zout.writestr(name, out[name].encode("utf-8"))
-    shutil.move(tmp, args.output)
+        # New entries take the reference model's timestamp so output is reproducible.
+        date_time = zin.getinfo(MODEL).date_time
+        zout = zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED)
+        try:
+            with zout:
+                for info in zin.infolist():
+                    if info.filename in dropped:
+                        continue
+                    data = out[info.filename].encode("utf-8") if info.filename in out else zin.read(info)
+                    zout.writestr(info, data, compress_type=info.compress_type)
+                for name in out:
+                    if name not in names:
+                        info = zipfile.ZipInfo(name, date_time)
+                        info.external_attr = 0o600 << 16
+                        zout.writestr(info, out[name].encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+            shutil.move(tmp, args.output)
+        except BaseException:
+            os.remove(tmp)
+            raise
 
     if not fits:
         print("copies don't fit on the plate; arrange it in the slicer", file=sys.stderr)
