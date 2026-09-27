@@ -198,7 +198,8 @@ def empty_text_mesh(submodels, model_obj, text_id, fix, path):
         if fix:
             frame = compose(frame, invert(fix))
         comp_xform = list(map(float, re.search(r'transform="([^"]*)"', comp.group(0)).group(1).split()))
-        new_comp = set_attr(new_comp, "transform", " ".join(f"{v:.9g}" for v in compose(comp_xform, frame)))
+        new_comp = set_attr(new_comp, "transform",
+                            " ".join(f"{v:.9g}" for v in compose(comp_xform, frame)))  # Orca's transform precision
     return model_obj.replace(comp.group(0), new_comp, 1), head + obj + tail
 
 
@@ -252,7 +253,8 @@ def build(zin, variants, plate_name):
     src_id = plate_ids[0]
 
     model_objs = {m.group(1): m.group(0) for m in MODEL_OBJ_RE.finditer(model)}
-    # First build item / assemble item of each object, in build order.
+    # First build item of each object, in build order (src_idx below relies on it),
+    # and first assemble item.
     items, assemble = {}, {}
     for m in ITEM_RE.finditer(model):
         items.setdefault(m.group(1), m.group(0))
@@ -388,7 +390,7 @@ def main():
     variants = []
     for n in range(args.count):
         density = str(args.min_density + step * n)
-        variants.append((f"{flow}-{density}", f"{flow[2:] or 0}-{density}", {
+        variants.append((f"{flow}-{density}", f"{flow[2:] or 0}-{density}", {  # fmt gives "1" for 1.0
             "bridge_flow": flow,
             "internal_bridge_flow": flow,
             "bridge_density": f"{density}%",
@@ -411,7 +413,6 @@ def main():
                 for name in out:
                     if name not in names:
                         info = zipfile.ZipInfo(name, date_time)
-                        info.external_attr = 0o600 << 16
                         zout.writestr(info, out[name].encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
             shutil.move(tmp, args.output)
         except BaseException:
