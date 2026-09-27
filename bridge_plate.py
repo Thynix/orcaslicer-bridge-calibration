@@ -30,6 +30,7 @@ MODEL = "3D/3dmodel.model"
 MODEL_RELS = "3D/_rels/3dmodel.model.rels"
 CONFIG = "Metadata/model_settings.config"
 RANGES = "Metadata/layer_config_ranges.xml"
+PROFILES = "Metadata/layer_heights_profile.txt"
 PROJECT = "Metadata/project_settings.config"
 GAP = 5  # minimum mm between copies
 
@@ -304,7 +305,8 @@ def build(zin, variants, plate_name):
     out = {MODEL: model, CONFIG: cfg}
     if MODEL_RELS in zin.namelist():
         rels = zin.read(MODEL_RELS).decode("utf-8")
-        rels = REL_RE.sub(lambda m: m.group(0) if m.group(1) in used else "", rels)
+        rels = REL_RE.sub(lambda m: "" if m.group(1).startswith("/3D/Objects/") and m.group(1) not in used
+                          else m.group(0), rels)
         next_rel = max(map(int, re.findall(r'Id="rel-(\d+)"', rels)), default=0) + 1
         new_rels = "".join(
             f' <Relationship Target="{path}" Id="rel-{next_rel + i}" '
@@ -313,16 +315,23 @@ def build(zin, variants, plate_name):
         out[MODEL_RELS] = rels.replace("</Relationships>", new_rels + "</Relationships>", 1)
     out.update({path.lstrip("/"): body for path, body in submodels.items()})
 
-    # Height ranges are keyed by 1-based object index in build order; every
-    # copy gets the reference's.
+    # Height ranges and variable layer height profiles are keyed by 1-based
+    # object index in build order; every copy gets the reference's.
+    src_idx = str(list(items).index(src_id) + 1)
     if RANGES in zin.namelist():
         ranges = zin.read(RANGES).decode("utf-8")
-        src_idx = str(list(items).index(src_id) + 1)
         block = next((m.group(0) for m in RANGE_OBJ_RE.finditer(ranges) if m.group(1) == src_idx), None)
         body = "".join(set_attr(block, "id", str(i)) for i in range(1, len(variants) + 1)) if block else ""
         first = RANGE_OBJ_RE.search(ranges)
         head = ranges[:first.start()] if first else ranges.replace("</objects>", "")
         out[RANGES] = head + body + "</objects>\n"
+    if PROFILES in zin.namelist():
+        # One "object_id=N|z0;h0;z1;h1;..." line per object.
+        profile = re.search(rf"^object_id={src_idx}\|(.*)$", zin.read(PROFILES).decode("utf-8"), re.M)
+        if profile:
+            out[PROFILES] = "".join(f"object_id={i}|{profile.group(1)}\n" for i in range(1, len(labels) + 1))
+        else:
+            dropped.add(PROFILES)
 
     return out, dropped, fits
 
