@@ -364,6 +364,8 @@ def build(zin, variants, plate_name, keep_text_mesh=False):
         extra = ", ".join(repr(meta_value(cfg_objs.get(o, ""), "name") or f"id {o}")
                           for o in sorted(extra, key=int))
         sys.exit(f"expected only the plate's object in the model, found extra (off-plate?): {extra}")
+    if src_id not in model_objs:
+        sys.exit(f"plate's object {src_id} not found in 3D/3dmodel.model")
 
     # Build items of each object, in build order (index = instance_id; src_idx
     # below relies on the order); assemble items keyed by (object_id, instance_id).
