@@ -96,12 +96,15 @@ def xform(values, point):
     return tuple(x * m[i] + y * m[3 + i] + z * m[6 + i] + m[9 + i] for i in range(3))
 
 
-def footprint(zin, model_obj, rotation):
-    """X/Y bounding box of a top-level object in its own frame, rotated as placed."""
+def footprint(zin, model_obj, rotation, skip):
+    """X/Y bounding box of a top-level object in its own frame, rotated as placed,
+    leaving out the components with ids in SKIP."""
     xs, ys = [], []
     meshes = {}
     for comp in re.finditer(r'<component p:path="([^"]+)" objectid="(\d+)"[^>]*transform="([^"]*)"', model_obj):
         path, oid, comp_xform = comp.groups()
+        if oid in skip:
+            continue
         if path not in meshes:
             meshes[path] = zin.read(path.lstrip("/")).decode("utf-8")
         body = re.search(rf'<object id="{oid}".*?</object>', meshes[path], re.S).group(0)
@@ -180,12 +183,16 @@ def build(zin, labels, plate_name):
     next_ordinal = max(int(u, 16) for u in
                        re.findall(r'<object [^>]*p:UUID="([0-9a-f]{8})', model)) + 1
     next_identify = max(int(v) for v in re.findall(r'key="identify_id" value="(\d+)"', cfg)) + 1
-    src_xform = re.search(r'transform="([^"]*)"', items[src]).group(1).split()
-    spots, fits = grid(len(labels), footprint(zin, model_objs[src], src_xform[:9]), bed)
 
     # Part ids in the config are the component objectids in 3dmodel.model.
     text_ids = [re.search(r'<part id="(\d+)"', m.group(0)).group(1)
                 for m in PART_RE.finditer(cfg_objs[src]) if "<slic3rpe:text" in m.group(0)]
+    # Like Orca's bounding box, the footprint counts only model parts, not
+    # modifiers, negative volumes or support blockers/enforcers.
+    subtypes = dict(re.findall(r'<part id="(\d+)" subtype="([^"]*)"', cfg_objs[src]))
+    skip = {i for i, t in subtypes.items() if t != "normal_part"}
+    src_xform = re.search(r'transform="([^"]*)"', items[src]).group(1).split()
+    spots, fits = grid(len(labels), footprint(zin, model_objs[src], src_xform[:9], skip), bed)
     submodels = {}  # new sub-model files: path -> contents
     next_file = max([int(n) for n in re.findall(r'_(\d+)\.model$', "\n".join(zin.namelist()), re.M)] + [0]) + 1
     new_obj = new_item = new_cfg = new_inst = new_asm = ""
