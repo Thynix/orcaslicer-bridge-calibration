@@ -7,9 +7,11 @@ The reference project must have one plate holding one object. OUT.3mf
 (overwritten if it exists) is the reference project with that object replaced
 by COUNT copies of it laid out in a grid, with bridge_flow and
 internal_bridge_flow set to FLOW and bridge_density stepping from MIN_DENSITY
-to MAX_DENSITY (percent, inclusive). Each copy's name, part names and text are
+to MAX_DENSITY (percent, inclusive). Each copy is named "FLOW-DENSITY", e.g.
+"1.3-104" for flow 1.3 and density 104%. Its text parts' text and names are
 set to "TENTHS-DENSITY", where TENTHS is the first decimal digit of FLOW, e.g.
-"3-104" for flow 1.3 and density 104%. The plate is named "Flow Factor FLOW".
+"3-104"; other part names are kept. FLOW must be 1.0 to 1.9 in steps of 0.1 so
+TENTHS identifies it. The plate is named "Flow Factor FLOW".
 
 Each copy's text part gets its own sub-model file holding an empty mesh, which
 a patched OrcaSlicer (branch rebuild-empty-text-on-load) rebuilds from the text
@@ -67,8 +69,9 @@ def fmt(value):
     return f"{round(value, 4):g}"
 
 
-def relabel(obj_cfg, oid, label, settings):
-    """Return a config <object> block with a new id, settings, and name, part names and text set to label."""
+def relabel(obj_cfg, oid, name, text, settings):
+    """Return a config <object> block with a new id, settings and name, and its
+    text parts' text and names set to TEXT."""
     obj_cfg = set_attr(obj_cfg, "id", oid)
     head_end = obj_cfg.index("    <part ") if "    <part " in obj_cfg else obj_cfg.index("  </object>")
     head, rest = obj_cfg[:head_end], obj_cfg[head_end:]
@@ -79,11 +82,14 @@ def relabel(obj_cfg, oid, label, settings):
     lines = [(k, meta[k]) for k in sorted(meta)]
     head = OBJ_META_RE.sub("", head) + "".join(
         f'    <metadata key="{k}" value="{html.escape(v, quote=True)}"/>\n'
-        for k, v in [("name", label)] + lines)
-    esc = html.escape(label, quote=True)
+        for k, v in [("name", name)] + lines)
+    esc = html.escape(text, quote=True)
 
     def relabel_part(m):
-        part = re.sub(r'(<metadata key="name" value=")[^"]*', rf"\g<1>{esc}", m.group(0), count=1)
+        part = m.group(0)
+        if "<slic3rpe:text" not in part:
+            return part
+        part = re.sub(r'(<metadata key="name" value=")[^"]*', rf"\g<1>{esc}", part, count=1)
         return TEXT_RE.sub(lambda t: f'{t.group(1)}{esc}"', part)
 
     return head + PART_RE.sub(relabel_part, rest)
@@ -189,20 +195,20 @@ def build(zin, labels, plate_name):
     submodels = {}  # new sub-model files: path -> contents
     next_file = max([int(n) for n in re.findall(r'_(\d+)\.model$', "\n".join(zin.namelist()), re.M)] + [0]) + 1
     new_obj = new_item = new_cfg = new_inst = new_asm = ""
-    for n, (label, settings) in enumerate(labels):
+    for n, (name, text, settings) in enumerate(labels):
         oid = str(next_id + n)
         placed = src_xform[:]
         placed[9:11] = (f"{v:.6g}" for v in spots[n])
         obj = renumber_uuids(set_attr(model_objs[src], "id", oid), next_ordinal + n)
         for text_id in text_ids:
-            path = f"/3D/Objects/{label}_{next_file}.model"
+            path = f"/3D/Objects/{name}_{next_file}.model"
             next_file += 1
             obj, submodels[path] = empty_text_mesh(zin, obj, text_id, path)
         new_obj += obj
         item = set_attr(items[src], "objectid", oid)
         item = re.sub(r'(p:UUID=")[0-9a-f]{8}', rf"\g<1>{int(oid):08x}", item, count=1)
         new_item += set_attr(item, "transform", " ".join(placed))
-        new_cfg += relabel(cfg_objs[src], oid, label, settings)
+        new_cfg += relabel(cfg_objs[src], oid, name, text, settings)
         inst = re.sub(r'(key="object_id" value=")\d+', rf"\g<1>{oid}", instances[0])
         new_inst += re.sub(r'(key="identify_id" value=")\d+', rf"\g<1>{next_identify + n}", inst)
         if src in assemble:
@@ -277,12 +283,16 @@ def main():
                  f"{args.max_density}; valid counts: 1, " + ", ".join(map(str, valid)))
 
     flow = fmt(args.flow)
+    # The text shows only the tenths to fit the tile's text area, so the flow
+    # must be one of 1.0-1.9 for them to identify it.
+    tenths = re.fullmatch(r"1(?:\.(\d))?", flow)
+    if not tenths:
+        ap.error(f"flow {flow} is not one of 1.0, 1.1, ... 1.9")
     step = (args.max_density - args.min_density) // max(args.count - 1, 1)
     labels = []
     for n in range(args.count):
         density = str(args.min_density + step * n)
-        # tenths to save space
-        labels.append((f"{int(args.flow*10)%10}-{density}", {
+        labels.append((f"{flow}-{density}", f"{tenths.group(1) or 0}-{density}", {
             "bridge_flow": flow,
             "internal_bridge_flow": flow,
             "bridge_density": f"{density}%",
