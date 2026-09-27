@@ -122,7 +122,7 @@ def density_percent(text):
     return value
 
 
-def relabel(obj_cfg, oid, name, text, settings):
+def relabel(obj_cfg, oid, name, text, settings, keep_text_mesh=False):
     """Return a config <object> block with a new id, settings and name, and its
     text parts' text and names set to TEXT."""
     obj_cfg = set_attr(obj_cfg, "id", oid)
@@ -146,8 +146,10 @@ def relabel(obj_cfg, oid, name, text, settings):
         if "<slic3rpe:text" not in part:
             return part
         part = set_meta(part, "name", esc)
-        # The fix transform is folded into the component transform by empty_text_mesh.
-        part = SHAPE_RE.sub(lambda s: re.sub(r' transform="[^"]*"', "", s.group(0)), part)
+        # The fix transform is folded into the component transform by empty_text_mesh,
+        # but only when empty_text_mesh runs (not with --keep-text-mesh).
+        if not keep_text_mesh:
+            part = SHAPE_RE.sub(lambda s: re.sub(r' transform="[^"]*"', "", s.group(0)), part)
         return TEXT_RE.sub(lambda t: f'{t.group(1)}{esc}"', part)
 
     return head + PART_RE.sub(relabel_part, rest)
@@ -395,7 +397,7 @@ def build(zin, variants, plate_name, keep_text_mesh=False):
         item = set_attr(src_item, "objectid", oid)
         item = re.sub(r'(p:UUID=")[0-9a-f]{8}', rf"\g<1>{int(oid):08x}", item, count=1)
         new_item += set_attr(item, "transform", " ".join(placed))
-        new_cfg += relabel(cfg_objs[src_id], oid, name, text, settings)
+        new_cfg += relabel(cfg_objs[src_id], oid, name, text, settings, keep_text_mesh)
         # Each copy is a single instance, so it's instance 0.
         inst = set_meta(instances[0], "object_id", oid)
         inst = set_meta(inst, "instance_id", "0")
