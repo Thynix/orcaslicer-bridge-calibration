@@ -336,6 +336,11 @@ def build(zin, variants, plate_name, keep_text_mesh=False):
     if CONFIG not in names:
         sys.exit("not an Orca/Bambu project: no Metadata/model_settings.config")
     cfg = read_text(zin, CONFIG)
+    if PROJECT not in names:
+        sys.exit(
+            f"{zin.filename} is missing expected metadata; is it a complete project "
+            "or is it an incomplete reference 3mf?"
+        )
     proj = json.loads(zin.read(PROJECT))
     bed = bbox([tuple(map(float, p.split("x"))) for p in proj["printable_area"]])
     # Same "XxY" format as printable_area; missing, empty or a degenerate
