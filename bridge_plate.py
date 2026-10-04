@@ -2,13 +2,13 @@
 """Make a bridge flow/density test plate from an OrcaSlicer 3MF reference
 project.
 
-Usage: bridge_plate.py REFERENCE.3mf OUT.3mf COUNT FLOW MIN_DENSITY MAX_DENSITY
+Usage: bridge_plate.py REFERENCE.3mf OUT.3mf COUNT FLOW MIN_DENSITY DENSITY_STEP
 
 The reference project must have one plate holding one object. OUT.3mf
 (overwritten if it exists) is the reference project with that object replaced
 by COUNT copies of it laid out in a grid, with bridge_flow and
 internal_bridge_flow set to FLOW and bridge_density stepping from MIN_DENSITY
-to MAX_DENSITY (percent, inclusive). Each copy is named "FLOW-DENSITY", e.g.
+by DENSITY_STEP (percent) for each successive copy. Each copy is named "FLOW-DENSITY", e.g.
 "1.3-104" for flow 1.3 and density 104% (FLOW is written as Orca writes the
 setting, so 1.0 is "1", not "1.0"). Its text parts' text and names are set to
 "TENTHS-DENSITY", where TENTHS is the first decimal digit of FLOW, e.g.
@@ -538,10 +538,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("reference", help="reference project")
     ap.add_argument("output", help="output project, overwritten if it exists")
-    ap.add_argument("count", type=int, help="number of copies; COUNT - 1 must divide MAX_DENSITY - MIN_DENSITY")
     ap.add_argument("flow", type=flow_ratio, help="bridge flow ratio, 1.0 to 1.9 in steps of 0.1")
+    ap.add_argument("count", type=int, help="number of copies")
     ap.add_argument("min_density", type=density_percent, help="first bridge density, integer percent, 10 to 125")
-    ap.add_argument("max_density", type=density_percent, help="last bridge density, integer percent, 10 to 125")
+    ap.add_argument("density_step", type=int,
+                     help="bridge density step between copies, percent (may be negative); unused when count is 1")
     ap.add_argument("--keep-text-mesh", action="store_true",
                      help="keep each copy's text part on the reference's original, unmodified mesh "
                           "(so stock OrcaSlicer doesn't drop it), instead of an empty mesh a patched "
@@ -552,24 +553,18 @@ def main():
         ap.error("output must differ from the reference")
     if args.count < 1:
         ap.error("count must be at least 1")
-    span = abs(args.max_density - args.min_density)
-    if args.count > 1 and not span:
-        ap.error(f"count {args.count} needs different min and max densities; "
+    if args.count > 1 and args.density_step == 0:
+        ap.error(f"count {args.count} needs a non-zero density_step; "
                  "otherwise the copies would be identical")
-    if args.count == 1 and span:
-        ap.error("count 1 needs equal min and max densities")
-    if args.count > 1 and span % (args.count - 1):
-        # count - 1 steps must divide the span, so valid counts are d + 1 for divisors d of span.
-        valid = [d + 1 for d in range(1, span + 1) if span % d == 0]
-        ap.error(f"count {args.count} gives non-integer densities from {args.min_density} to "
-                 f"{args.max_density}; valid counts: " + ", ".join(map(str, valid)))
+    densities = [args.min_density + args.density_step * n for n in range(args.count)]
+    bad = next((d for d in densities if not 10 <= d <= 125), None)
+    if bad is not None:
+        ap.error(f"density {bad} is outside Orca's bridge_density range of 10 to 125")
 
     flow = fmt(args.flow)
     tenths = round(args.flow * 10) % 10
-    step = (args.max_density - args.min_density) // max(args.count - 1, 1)
     variants = []
-    for n in range(args.count):
-        density = str(args.min_density + step * n)
+    for density in densities:
         variants.append((f"{flow}-{density}", f"{tenths}-{density}", {
             "bridge_flow": flow,
             "internal_bridge_flow": flow,
