@@ -4,3 +4,4 @@
 __pycache__/
 bridge_plate.py.zip
 /plans/
+.ruff_cache/
