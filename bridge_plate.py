@@ -45,19 +45,19 @@ GAP = 5  # minimum mm between copies
 
 # The files are edited as text: model_settings.config uses undeclared
 # namespace prefixes, and this keeps everything not touched byte-identical.
-MODEL_OBJ_RE = re.compile(r'^  <object id="(\d+)".*?^  </object>\n', re.M | re.S)
-ITEM_RE = re.compile(r'^  <item objectid="(\d+)"[^>]*/>\n', re.M)
+MODEL_OBJ_RE = re.compile(r'^  <object id="(\d+)".*?^  </object>\n', re.MULTILINE | re.DOTALL)
+ITEM_RE = re.compile(r'^  <item objectid="(\d+)"[^>]*/>\n', re.MULTILINE)
 COMPONENT_PATH_RE = re.compile(r'<component p:path="([^"]+)"')
-CFG_OBJ_RE = re.compile(r'^  <object id="(\d+)"[^>]*>.*?^  </object>\n', re.M | re.S)
-PLATE_RE = re.compile(r"^  <plate>.*?^  </plate>\n", re.M | re.S)
-INSTANCE_RE = re.compile(r"^    <model_instance>.*?^    </model_instance>\n", re.M | re.S)
-ASSEMBLE_RE = re.compile(r'^   <assemble_item [^>]*/>\n', re.M)
+CFG_OBJ_RE = re.compile(r'^  <object id="(\d+)"[^>]*>.*?^  </object>\n', re.MULTILINE | re.DOTALL)
+PLATE_RE = re.compile(r"^  <plate>.*?^  </plate>\n", re.MULTILINE | re.DOTALL)
+INSTANCE_RE = re.compile(r"^    <model_instance>.*?^    </model_instance>\n", re.MULTILINE | re.DOTALL)
+ASSEMBLE_RE = re.compile(r'^   <assemble_item [^>]*/>\n', re.MULTILINE)
 # layer_config_ranges.xml and cut_information.xml are both boost::ptree XML
 # with the same beautified indentation.
-XML_OBJ_RE = re.compile(r'^ <object id="(\d+)">.*?^ </object>\n', re.M | re.S)
-REL_RE = re.compile(r'^ <Relationship Target="([^"]+)"[^>]*/>\n', re.M)
-OBJ_META_RE = re.compile(r'^    <metadata key="([^"]+)" value="[^"]*"/>\n', re.M)
-PART_RE = re.compile(r"^    <part .*?^    </part>\n", re.M | re.S)
+XML_OBJ_RE = re.compile(r'^ <object id="(\d+)">.*?^ </object>\n', re.MULTILINE | re.DOTALL)
+REL_RE = re.compile(r'^ <Relationship Target="([^"]+)"[^>]*/>\n', re.MULTILINE)
+OBJ_META_RE = re.compile(r'^    <metadata key="([^"]+)" value="[^"]*"/>\n', re.MULTILINE)
+PART_RE = re.compile(r"^    <part .*?^    </part>\n", re.MULTILINE | re.DOTALL)
 TEXT_RE = re.compile(r'(<slic3rpe:text\b[^>]*\btext=")[^"]*"')
 SHAPE_RE = re.compile(r'<slic3rpe:shape\b[^>]*>')
 VERTEX_RE = re.compile(r'<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"')
@@ -199,7 +199,7 @@ def footprint(submodels, model_obj, rotation, skip):
         oid = attr(comp, "objectid")
         if oid in skip:
             continue
-        body = re.search(rf'<object id="{oid}".*?</object>', submodels[attr(comp, "p:path")], re.S).group(0)
+        body = re.search(rf'<object id="{oid}".*?</object>', submodels[attr(comp, "p:path")], re.DOTALL).group(0)
         comp_m = floats(attr(comp, "transform"))
         for v in VERTEX_RE.finditer(body):
             x, y, _ = xform(rotation, xform(comp_m, map(float, v.groups())))
@@ -223,7 +223,7 @@ def empty_text_mesh(submodels, model_obj, text_id, fix, path):
     comp = comps[0]
     src_path, uuid_prefix = comp.groups()
     src_text = submodels[src_path]
-    src_obj = re.search(rf'^  <object id="{text_id}" p:UUID="[0-9a-f]{{8}}([^"]*)".*?</object>', src_text, re.M | re.S)
+    src_obj = re.search(rf'^  <object id="{text_id}" p:UUID="[0-9a-f]{{8}}([^"]*)".*?</object>', src_text, re.MULTILINE | re.DOTALL)
     if src_obj is None:
         sys.exit(f"text part {text_id}'s sub-model object doesn't match the expected p:UUID format")
     uuid_suffix = src_obj.group(1)
@@ -253,10 +253,10 @@ def rename_plate(plate, name):
     """Set a config <plate> block's plater_name, adding it after plater_id if missing."""
     name_line = f'    <metadata key="plater_name" value="{html.escape(name)}"/>\n'
     plate, renamed = re.subn(r'^    <metadata key="plater_name" value="[^"]*"/>\n',
-                             lambda m: name_line, plate, count=1, flags=re.M)
+                             lambda m: name_line, plate, count=1, flags=re.MULTILINE)
     if not renamed:
         plate = re.sub(r'(^    <metadata key="plater_id" [^\n]*\n)',
-                       lambda m: m.group(1) + name_line, plate, count=1, flags=re.M)
+                       lambda m: m.group(1) + name_line, plate, count=1, flags=re.MULTILINE)
     return plate
 
 
@@ -266,7 +266,7 @@ def reindex_lines(text, src_idx, count):
     order, plus optional non-"object_id=" header lines (e.g.
     brim_points_format_version=). Return it with the reference object's own
     line, if any, replicated to ids 1..COUNT; or None if it has none."""
-    line = re.search(rf"^object_id={src_idx}\|(.*)$", text, re.M)
+    line = re.search(rf"^object_id={src_idx}\|(.*)$", text, re.MULTILINE)
     if not line:
         return None
     header = "".join(ln + "\n" for ln in text.splitlines() if not ln.startswith("object_id="))
@@ -483,8 +483,9 @@ def build(zin, variants, plate_name, keep_text_mesh=False):
     referenced = set(re.findall(r'p:path="([^"]+)" objectid="(\d+)"', model))
     pruned = {}
     for path in used_esc & src_submodels.keys():
-        body = MODEL_OBJ_RE.sub(lambda m: m.group(0) if (path, m.group(1)) in referenced else "",
-                                src_submodels[path])
+        body = MODEL_OBJ_RE.sub(
+            lambda m, path=path: m.group(0) if (path, m.group(1)) in referenced else "",
+            src_submodels[path])
         if body != src_submodels[path]:
             pruned[path.lstrip("/")] = body
 
