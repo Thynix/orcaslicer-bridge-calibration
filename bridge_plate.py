@@ -48,7 +48,7 @@ GAP = 5  # minimum mm between copies
 MODEL_OBJ_RE = re.compile(r'^  <object id="(\d+)".*?^  </object>\n', re.M | re.S)
 ITEM_RE = re.compile(r'^  <item objectid="(\d+)"[^>]*/>\n', re.M)
 COMPONENT_PATH_RE = re.compile(r'<component p:path="([^"]+)"')
-CFG_OBJ_RE = re.compile(r'^  <object id="(\d+)">.*?^  </object>\n', re.M | re.S)
+CFG_OBJ_RE = re.compile(r'^  <object id="(\d+)"[^>]*>.*?^  </object>\n', re.M | re.S)
 PLATE_RE = re.compile(r"^  <plate>.*?^  </plate>\n", re.M | re.S)
 INSTANCE_RE = re.compile(r"^    <model_instance>.*?^    </model_instance>\n", re.M | re.S)
 ASSEMBLE_RE = re.compile(r'^   <assemble_item [^>]*/>\n', re.M)
