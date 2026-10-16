@@ -269,7 +269,7 @@ def reindex_lines(text, src_idx, count):
     line = re.search(rf"^object_id={src_idx}\|(.*)$", text, re.M)
     if not line:
         return None
-    header = "".join(l + "\n" for l in text.splitlines() if not l.startswith("object_id="))
+    header = "".join(ln + "\n" for ln in text.splitlines() if not ln.startswith("object_id="))
     return header + "".join(f"object_id={i}|{line.group(1)}\n" for i in range(1, count + 1))
 
 
