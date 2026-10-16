@@ -20,7 +20,7 @@ import zipfile
 import bridge_plate as bp
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REFERENCE = os.path.join(HERE, "reference", "reference-0.6n.3mf")
+REFERENCE = os.path.join(HERE, "reference", "mini-reference-0.8.3mf")
 GOLDEN = os.path.join(HERE, "golden.json")
 IDENTITY = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]
 
